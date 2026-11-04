@@ -1,0 +1,26 @@
+{
+  "name": "bench",
+  "version": "0.1.0",
+  "description": "开发者工作台：OpenSpec 进度、关键决策、MCP 审计、分支 diff、状态提示音",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "editor": {
+      "type": "string",
+      "title": "打开文件的编辑器",
+      "description": "面板里点文件名时用它打开。终端内 = 不开外部程序，只在面板里看。",
+      "options": [
+        "终端内",
+        "vscode",
+        "cursor",
+        "idea",
+        "sublime",
+        "系统默认"
+      ],
+      "default": "终端内"
+    }
+  },
+  "license": "MIT",
+  "author": {
+    "name": "zhongzhiguo"
+  }
+}

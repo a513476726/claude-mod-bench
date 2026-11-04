@@ -1,0 +1,11 @@
+{
+  "name": "dev-mods",
+  "owner": { "name": "gary" },
+  "plugins": [
+    {
+      "name": "bench",
+      "source": "./",
+      "description": "开发者个人面板：OpenSpec 进度、关键决策、MCP 调用审计、状态提示音"
+    }
+  ]
+}
