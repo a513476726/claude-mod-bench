@@ -12,6 +12,9 @@ node_modules/
 .vscode/
 *.swp
 
+# OMC runtime state
+.omc/
+
 # Local run artifacts
 *.log
 .dev-panel-dock.txt

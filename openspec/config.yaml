@@ -1,0 +1,45 @@
+schema: spec-driven
+
+context: |
+  Language: zh-CN
+  All artifacts must be written in zh-CN.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  ## 项目
+  bench —— Claude Code 的进程内 mod（开发者工作台面板）。
+  引擎 hook 驱动，无构建步骤。全部逻辑在 hooks/register.tsx，
+  类型契约在 types/index.d.ts，界面规范在 docs/UI-SPEC.md，
+  引擎硬约束与三角色流程在 docs/SKILL.md。
+
+  ## 流程（两层）
+  外层 OpenSpec：/opsx:propose → /opsx:apply → /opsx:archive。
+  内层三角色（仅在 apply 阶段，见 docs/SKILL.md §1）：
+  架构师 + UI 设计师并行评审 → 功能开发工程师实施 → 架构师复审 + 三项验证。
+
+  ## 规格边界
+  - openspec/specs/ 只写**用户可感知的行为**：面板显示什么、交互怎么响应、数据何时刷新。
+  - 引擎硬约束（$ 只能传模块顶层函数、只能静态 import、UI 符号集、列宽）已在
+    docs/SKILL.md 与 docs/UI-SPEC.md 成文，**不要在 spec 里抄写**，改为在那里维护。
+  - 代码模块拆分属于 design.md 的「实现约束」，不进 spec。
+
+rules:
+  proposal:
+    - 写清「为什么现在做」和「不改会怎样」
+    - 至少写一条 Non-goals（本变体不适用的场景）
+  design:
+    - 涉及 UI 的，逐条引用 docs/UI-SPEC.md 的章节号
+    - 明确列出本次变更对引擎硬约束的影响（无影响也要写「无」）
+  tasks:
+    - 每个任务可独立验证，粒度不超过一个文件的一处改动
+    - 最后一个任务固定为「三项验证：tsc / claude plugin test . / claude plugin validate .」
+    - 新增 atom 的任务必须同时写明同步 types/index.d.ts 并递增 shape
+
+operations:
+  apply:
+    guidance:
+      - 实施前先跑一遍三项验证，确认基线是绿的；不绿先停下报告
+      - 新增/修改行为必须配 hooks/*.test.tsx，覆盖空态与一条数据
+      - 完成后报告三项验证的**实际输出**，不得用「应该通过」代替
+  archive:
+    guidance:
+      - 归档前确认三项验证全绿，且 docs/SKILL.md / UI-SPEC.md 已随行为变化更新

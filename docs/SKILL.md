@@ -27,13 +27,33 @@ description: Claude Code mod（插件层进程内面板/行为）的三角色协
 
 ### 协作顺序（强制）
 
+本项目用 OpenSpec 管理变更（`openspec/`，配置见 `openspec/config.yaml`），
+三角色流程是其 **apply 阶段的内层**：
+
 ```
-需求
+/opsx:propose   需求 → proposal.md / spec delta / design.md / tasks.md
+                （只出规划，不写代码；此时已定下「做什么」，不涉及三角色分工）
+/opsx:apply     实施，内层走三角色：
  → 架构师 + UI设计师【并行评审/出规范】
  → 开发工程师【合并，冲突时：用户可感知的交互 > 内部结构】
- → 实施
- → 架构师【复审结构】+ 验证（tsc / test / validate）
+ → 实施（逐条勾 tasks.md）
+ → 架构师【复审结构】+ 验证（tsc / test / validate，见 §5）
+/opsx:archive   验证全绿后归档，delta 合入 openspec/specs/
+ → 文档回归（提交前必做，见 §5.1）
+ → 提交
 ```
+
+`/opsx:update` 用于变更进行中修订规划；`/opsx:explore` 用于动手前探索。
+没有 `openspec/changes/<name>/` 的需求，不走代码修改。
+
+层级：
+
+| 层 | 位置 | 角色 |
+|---|---|---|
+| 规格 | `openspec/specs/` | 行为契约，按能力组织，归档时合入 |
+| 过程 | `openspec/changes/` | 一个变更从提案到归档的全过程，归档后只读 |
+| 功能文档 | `docs/features/` | 给人看：每个页签是什么、为什么、怎么用。`README.md` 是按时间的索引 |
+| 测试文档 | `docs/tests/` | 给人看：每个页签怎么验、验过什么、哪些没自动化。`README.md` 是按时间的索引 |
 
 **关键规则：评审与实施分离。** 评审阶段代理只读不写，写入方唯一（开发工程师），避免并行改同一文件互相覆盖。
 
@@ -76,8 +96,8 @@ description: Claude Code mod（插件层进程内面板/行为）的三角色协
 
 ## 3. 代码规范（架构师 checklist）
 
-1. 入口 `register.tsx` 只放 `on(...)` 注册与回调骨架，纯逻辑拆到独立文件
-2. 拆分保持单向依赖：`format` ← `scan` / `items` ← `views` ← `register`
+1. 入口 `register.tsx` 只放 `on(...)` 注册与回调骨架，纯逻辑拆到独立文件（当前：`format` / `scan` / `files` / `items` / `conversation` / `panes`）
+2. 拆分保持单向依赖：`format` ← `scan` / `files` / `items` / `conversation` / `panes` ← `register`；`panes` 只接收数据与 `actions` 回调，不直接读写 atom
 3. 页签做成元数据表 `TAB_DEFS`，新增页签只改表，不在视图里加 `tab === 'xxx'` 分支
 4. 用户可见字符串（分区名、符号、空态文案）集中在常量/theme，不散落在 JSX
 5. 每个 `on(...)` 显式 `return next(e)` 或 `return ran`
@@ -203,6 +223,16 @@ claude plugin validate .
 ```
 
 **三项全绿才算完成。** 任何一项失败，不得声称"已通过"。
+
+### 5.1 文档回归（提交前必做）
+
+三项验证通过、`openspec archive` 完成后，再更新两层文档，**之后才允许提交**：
+
+1. **功能层**：更新 `docs/features/<页签>/README.md`；在 `docs/features/README.md` 的时间线顶部加一行（日期 · 变更名 · 影响页签 · 一句话结果）。
+2. **测试层**：更新 `docs/tests/<页签>/README.md`（新测试进了「覆盖的测试」表，未覆盖的进「未自动化的部分」）；在 `docs/tests/README.md` 的时间线顶部加一行，并修正合计条数。
+3. **对照检查**：功能文档里写的规则必须能在代码里找到；条数、上限、键名与实现一致。写了但代码没有的，是实现漏了；代码有但没写的，是文档漏了。
+
+`openspec/specs/` 写「必须怎样」（行为契约），`docs/features/` 写「人怎么看」（读得懂的解释与用法）。两者不互相复制。
 
 完成后必须报告：
 - 每项的实际输出（不是"应该通过"）

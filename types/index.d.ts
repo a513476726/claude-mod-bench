@@ -33,16 +33,54 @@ export type SpecChange = {
   open: string[]
 }
 
-/** A decision or turn the person would want to find again. */
-export type Decision = {
-  id: string
-  /** `decision` (the person answered a question), `prompt` (they typed one). */
-  kind: 'decision' | 'prompt'
-  /** Epoch ms. */
-  at: number
-  /** A one-line summary, never the whole exchange. */
-  summary: string
+/** One tool a turn called, counted by name rather than stored one by one. */
+export type TurnTool = {
+  /** The tool's name as the model called it (`Read`, `Bash`, `mcp__server__tool`). */
+  name: string
+  /** How many times this turn called it. */
+  count: number
+  /** Of those, how many were refused or reported an error. */
+  fails: number
 }
+
+/** What a turn cost, as the engine counted it. */
+export type TurnCost = {
+  /** The model that answered, by the id the API reports. */
+  model: string
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/**
+ * One round of conversation: what the person said (or asked), and what came of
+ * it, filled in as the turn runs and closed when it ends.
+ */
+export type Turn = {
+  id: string
+  /** `input` (the person typed), `ask` (the model asked), `continuation` (a turn with no typed prompt). */
+  kind: 'input' | 'ask' | 'continuation'
+  /** Epoch ms the turn opened. */
+  at: number
+  /** The person's words in full, or the first question asked. */
+  text: string
+  /** The slash command the submission ran, where it ran one. */
+  command?: string
+  /** How many images or files the submission carried. */
+  attachments: number
+  /** True until the turn ends; a turn whose end was never heard stays open. */
+  isOpen: boolean
+  /** Why the turn ended, once it has. */
+  endReason?: 'answer' | 'aborted' | 'refusal' | 'error'
+  durationMs?: number
+  /** The model's final visible text this turn. */
+  answer: string
+  usage?: TurnCost
+  /** The tools the turn called, one entry per name, in the order first called. */
+  tools: TurnTool[]
+}
+
 
 /** One call a tool made, grouped by the MCP server (or `local`) that served it. */
 export type Call = {
@@ -89,11 +127,11 @@ declare module 'claude-code' {
   interface PluginState {
     'bench': {
       changes: Shaped<SpecChange[]>
-      decisions: Shaped<Decision[]>
+      decisions: Shaped<Turn[]>
       calls: Shaped<Call[]>
       branches: Shaped<Branch[]>
       sounds: Shaped<SoundSettings>
-      view: Shaped<{ tab: string; index: number; isDetail: boolean; closed: string[] }>
+      view: Shaped<{ tab: string; index: number; isDetail: boolean; closed: string[]; fullSection: 'input' | 'answer' | null }>
       diff: Shaped<{ repo: string; text: string; files: number; fresh: string[] } | null>
       file: Shaped<{ path: string; name: string; text: string; isTrimmed: boolean } | null>
     }
