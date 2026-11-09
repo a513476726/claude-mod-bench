@@ -41,6 +41,8 @@ export type TurnTool = {
   count: number
   /** Of those, how many were refused or reported an error. */
   fails: number
+  /** The last calls themselves, oldest first; the most recent 50 are kept. */
+  notes: ToolNote[]
 }
 
 /** What a turn cost, as the engine counted it. */
@@ -81,6 +83,23 @@ export type Turn = {
   tools: TurnTool[]
 }
 
+/** One call of a tool, as the turn keeps it: enough to say what ran, and to
+ * drill back into it later. */
+export type ToolNote = {
+  /** Epoch ms the call started. */
+  at: number
+  /** Milliseconds it took, `-1` while it runs. */
+  ms: number
+  /** Answered without error. */
+  isOk: boolean
+  /** One line: a Bash command, a Skill's name, otherwise the tool and its first argument. */
+  summary: string
+  /** The whole of what was asked, cut at 2 000 characters. */
+  detail: string
+  /** The text the model read, cut at 400 characters. */
+  result: string
+}
+
 
 /** One call a tool made, grouped by the MCP server (or `local`) that served it. */
 export type Call = {
@@ -105,10 +124,20 @@ export type Call = {
   result: string
 }
 
+/**
+ * What the last OpenSpec walk found. `none` is a folder walked and empty; `skipped`
+ * is a folder not walked at all, which used to read as `none` on screen.
+ */
+export type ScanState =
+  | { kind: 'ok' | 'none'; repos: string[]; isStale: boolean }
+  | { kind: 'skipped'; repos: string[]; why: string; isStale: boolean }
+
 /** A folder under the workspace and the branch it is on. */
 export type Branch = {
-  /** The folder's name: `sales-platform`, or `.` for the workspace root itself. */
+  /** The row's name: the folder's name, or `.` for the workspace root itself. */
   name: string
+  /** The folder's own name, even when the row is drawn as the root's `.`. */
+  folder?: string
   /** The branch its `.git/HEAD` names, empty where it names none. */
   branch: string
   /** Files the working copy has changed, staged or not; 0 is a clean tree. */
@@ -127,13 +156,45 @@ declare module 'claude-code' {
   interface PluginState {
     'bench': {
       changes: Shaped<SpecChange[]>
+      /** What the last OpenSpec walk found, and why it found nothing when it did not. */
+      scanState: Shaped<ScanState>
       decisions: Shaped<Turn[]>
       calls: Shaped<Call[]>
       branches: Shaped<Branch[]>
       sounds: Shaped<SoundSettings>
-      view: Shaped<{ tab: string; index: number; isDetail: boolean; closed: string[]; fullSection: 'input' | 'answer' | null }>
-      diff: Shaped<{ repo: string; text: string; files: number; fresh: string[] } | null>
-      file: Shaped<{ path: string; name: string; text: string; isTrimmed: boolean } | null>
+      view: Shaped<{
+        tab: string
+        index: number
+        isDetail: boolean
+        closed: string[]
+        fullSection: 'input' | 'answer' | null
+        /** How deep the person has drilled from the tab's own list; empty at the list. */
+        path: string[]
+        /** What the OpenSpec list is narrowed to. */
+        filter: { repo: string; since: 'all' | 'today' | '7d' | '30d' }
+      }>
+      diff: Shaped<{
+        repo: string
+        text: string
+        files: number
+        fresh: string[]
+        /** The diff cut file by file: each its own slice, with its own counts. */
+        groups: {
+          rel: string
+          text: string
+          /** The file as it stands now, for the whole-file reading; empty until read. */
+          full: string
+          added: number
+          removed: number
+          isNew: boolean
+          isTruncated: boolean
+          /** Holds a NUL byte: there is no text to draw, only a name and a count word. */
+          isBinary: boolean
+          /** The file could not be read; its count is unknown, not zero. */
+          isUnread: boolean
+        }[]
+      } | null>
+      file: Shaped<{ path: string; name: string; text: string; isTrimmed: boolean; isBinary: boolean; isUnread: boolean } | null>
     }
   }
 }

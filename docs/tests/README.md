@@ -6,6 +6,14 @@
 
 | 日期 | 变更 | 新增/修改测试 | 结果 |
 |---|---|---|---|
+| 2026-11-09 | `panel-layout-system` | 新增 `hooks/ui.test.tsx`(12)；`scan`/`folding`/`branch`/`interaction` 各加 1–2 条布局与换行用例 | 73 → **92 条全绿**；`tsc` 0 错误 |
+| 2026-11-06 | `fix-diff-view-and-sounds` | `hooks/diff.test.tsx`(+4)、`hooks/interaction.test.tsx`(+1 改写 1，删宠物 1)、删 `hooks/pet.test.tsx`(−13) | 81 → 73 条全绿（宠物 13 条移除，新增/改写 5 条） |
+| 2026-11-06 | `fix-openspec-scan-and-filters` | `hooks/scan.test.tsx`(+5)、`hooks/filter.test.tsx`(6) | 68 → 81 条全绿 |
+| 2026-11-06 | `fix-branch-discovery` 续 | `hooks/diff.test.tsx`（3 条） | 65 → 68 条全绿 |
+| 2026-11-04 | `add-pet-companion` | `hooks/pet.test.tsx`（13 条） | 52 → 65 条全绿 |
+| 2026-11-04 | `add-conversation-stats` | `hooks/stats.test.tsx`（9 条） | 43 → 52 条全绿 |
+| 2026-11-04 | `fix-openspec-single-repo` | `hooks/scan.test.tsx`（4 条） | 39 → 43 条全绿 |
+| 2026-11-04 | `fix-branch-discovery` | `hooks/branch.test.tsx`（4 条） | 35 → 39 条全绿 |
 | 2026-11-04 | `rebuild-decisions-as-conversation` | `hooks/conversation.test.tsx`（12 条） | 14 → 26 条全绿 |
 | 2026-11-04 | `collapse-long-turn-sections` | `hooks/folding.test.tsx`（9 条） | 26 → 35 条全绿 |
 
@@ -13,13 +21,16 @@
 
 | 页签 | 测试文档 | 自动化条数 | 主要文件 |
 |---|---|---|---|
-| OpenSpec + 分支区 | [tests/openspec](openspec/README.md) | 9 | `grouping.test.tsx`(1)、`interaction.test.tsx`(8) |
-| 对话 | [tests/conversation](conversation/README.md) | 21 | `conversation.test.tsx`(12)、`folding.test.tsx`(9) |
+| OpenSpec | [tests/openspec](openspec/README.md) | 18 | `grouping.test.tsx`(1)、`scan.test.tsx`(11)、`filter.test.tsx`(6) |
+| 分支区 | [tests/branch](branch/README.md) | 14 | `branch.test.tsx`(4)、`interaction.test.tsx`(3)、`diff.test.tsx`(7) |
+| 对话 | [tests/conversation](conversation/README.md) | 30 | `conversation.test.tsx`(12)、`folding.test.tsx`(9)、`stats.test.tsx`(9) |
 | MCP | [tests/mcp](mcp/README.md) | 2 | `register.test.tsx` |
-| 提示音 | [tests/sound](sound/README.md) | 1 | `interaction.test.tsx` |
+| 提示音 | [tests/sounds](sounds/README.md) | 1 | `interaction.test.tsx`(1) |
+| ~~宠物~~ | [tests/pet](pet/README.md) | 0 | 2026-11-06 起移除 |
 | 启动与横条 | 见下 | 2 | `register.test.tsx` |
+| 界面构件 | [tests/ui](ui/README.md) | 10 | `ui.test.tsx` |
 
-合计 **35 条**（`grouping` 1 + `interaction` 9 + `register` 4 + `conversation` 12 + `folding` 9）。
+合计 **73 条**（`scan` 11 + `filter` 6 + `grouping` 1 + `interaction` 10 + `register` 4 + `conversation` 12 + `folding` 9 + `branch` 4 + `stats` 9 + `diff` 7）。
 
 「启动与横条」2 条：页签标题与空态（`the pane draws its titles…`）、AbovePrompt 横条的总数与入口（`the band above the prompt…`）。
 

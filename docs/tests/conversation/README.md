@@ -12,6 +12,20 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 
 ## 覆盖的测试
 
+### 会话统计与下钻（`hooks/stats.test.tsx`）
+
+| 测试 | 验的是什么 |
+|---|---|
+| the session’s cost is summed model by model, with a total | 两个模型、三轮：分组正确，合计等于各项之和 |
+| tool kinds and calls are counted, and commands with them | 工具种类、总次数、`Bash` 次数分别统计 |
+| a session with nothing yet has nothing to total | 空会话：无模型、0 次 |
+| the session block opens the tools, a tool opens its calls, a call opens itself | 统计 → 工具分组 → 某工具调用 → 单次调用页；三层返回回到对话列表 |
+| a round’s tool name opens that tool’s calls for the round | 轮次详情里的 `Bash ×2` 存在且可点 |
+| the commands list says so when nothing was run | 没执行命令时的空态文案 |
+| a call’s note is cut where a row stops reading, and the newest 50 stand | 每工具只留最近 50 条；摘要 / 参数 / 结果按上限截断 |
+| a Skill call is noted by the skill it loaded | `Skill` 调用的摘要就是技能名 |
+| a summary names a Bash command, a Skill, or the tool and its first argument | 摘要规则：Bash 取命令、Skill 取技能名、其余取工具名 + 首参 |
+
 ### 轮次本身（纯函数，`hooks/conversation.test.tsx`）
 
 | 测试 | 验的是什么 |
@@ -45,9 +59,9 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 | a short round is drawn whole, with no fold mark and no buttons | 不超不折：没有「查看全部」，没有 `full-input` / `full-answer` 按钮 |
 | a long answer folds to half the screen, and the end still shows | 200 行回答 → 说明行含「共 200 行」；「结束」仍在文本里 |
 | a long input folds to six lines | 30 行输入 → 「已显示 6 行」+ 按钮 |
-| the whole answer opens on request, and steps back to the detail | 全屏显示 `── 回答（共 200 行）` 与最后一行；返回后折叠恢复 |
+| the whole answer opens on request, and steps back to the detail | 全屏视图的**卡片标题**带「共 200 行」，正文到最后一行；返回后折叠恢复 |
 | b steps back from the whole body to the detail, then to the list | 层级：全屏 → 详情 → 列表 |
-| the whole-body view is the whole pane: no tabs to wander off by | 全屏视图里没有页签，也没有 `back` |
+| the whole-body view is the whole pane: no tabs to wander off by | 全屏阅读页是安静页：没有页签与分支卡，右上角只有 `back` |
 
 ## 未自动化的部分
 

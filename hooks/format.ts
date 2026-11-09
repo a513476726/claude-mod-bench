@@ -1,14 +1,24 @@
 /**
- * Width-aware text for a terminal: CJK glyphs take two cells, and a column that
- * pads or clips by `length` lines up only on ASCII.
+ * The code points a terminal draws two cells wide: CJK ideographs and their
+ * punctuation, Hangul, kana — and emoji, which are wide in an emoji-presenting
+ * terminal (one whose font has a colour font for them). An edge counted one cell
+ * short hands the engine one cell too many, and the right corner is what it drops.
  */
+const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1F300}-\u{1F5FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2B00}-\u{2BFF}\u{231A}-\u{231B}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}\u{25AA}-\u{25FE}\u{2934}-\u{2935}\u{2B05}-\u{2B07}]/u
 
-/** How many cells a run of text takes: a CJK glyph is two, the rest one. */
+/** A variation selector rides the glyph before it and takes no cell of its own. */
+const SELECTOR = /[︎️]/u
+
+/** How many cells a run of text takes: a CJK glyph or an emoji is two, the rest one. */
 export function cellsOf(text: string): number {
   let cells = 0
 
   for (const char of text) {
-    cells += /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿豈-﫿＀-｠￠-￦]/.test(char) ? 2 : 1
+    if (SELECTOR.test(char)) {
+      continue
+    }
+
+    cells += WIDE.test(char) ? 2 : 1
   }
 
   return cells
@@ -40,9 +50,28 @@ export function midClip(text: string, width: number): string {
   return `${text.slice(0, head)}…${text.slice(-tail)}`
 }
 
-/** A name cut at its end, which is what a column that may run long wants. */
+/** A name cut at its end, which is what a column that may run long wants. The cut
+ * is by display width: `slice` counts characters, and ten CJK glyphs are twenty cells. */
 export function endClip(text: string, width: number): string {
-  return cellsOf(text) <= width ? text : `${text.slice(0, Math.max(1, width - 1))}…`
+  if (cellsOf(text) <= width) {
+    return text
+  }
+
+  let kept = ''
+  let cells = 0
+
+  for (const char of text) {
+    const next = cellsOf(char)
+
+    if (cells + next > Math.max(1, width - 1)) {
+      break
+    }
+
+    kept += char
+    cells += next
+  }
+
+  return `${kept}…`
 }
 
 /** A path kept within a row's room. */

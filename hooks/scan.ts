@@ -5,17 +5,283 @@ import { lastOf, parentOf } from './format'
 
 export type Group = 'doing' | 'ready' | 'broken' | 'archived' | 'bare'
 
-/** A folder under the workspace that may hold `openspec/changes`. */
-export const REPO_NAMES = ['sales-platform', 'sales_platform_web', 'old_sales', 'feishu_sale_h5']
+/** One folder worth reading: the row's name, and where git and openspec are read. */
+export type Repo = {
+  path: string
+  label: string
+  /** The workspace's own folder, drawn first with the `*` mark. */
+  isRoot: boolean
+}
 
-export async function scan($: EngineInterface): Promise<SpecChange[]> {
-  const workspace = await workspaceOf($)
+export type Discovery = {
+  /** Where an `openspec/changes` of the workspace itself would live. */
+  workspace: string
+  /** The folders the branch line and the scan both read, deduplicated, in order. */
+  repos: Repo[]
+  /** False when the space is one the person gave up on: nothing is read from it. */
+  isLocal: boolean
+}
+
+/**
+ * What one walk of the OpenSpec folders found, and why it found nothing when it
+ * found nothing: an empty list and an unread folder look the same on screen
+ * unless the walk says which it was.
+ */
+export type ScanOutcome =
+  | { kind: 'ok'; changes: SpecChange[]; repos: string[] }
+  | { kind: 'none'; repos: string[] }
+  | { kind: 'skipped'; why: string }
+  | { kind: 'failed' }
+
+/** How far above the session's folder a workspace is looked for: deep enough for
+ * `<space>/<repo>/<sub>`, shallow enough never to climb to a home directory's parent. */
+const MAX_CLIMB = 2
+
+/** Folders that are never a repo of the space, whatever git metadata they hold. */
+const IGNORED = ['.git', 'node_modules']
+
+/** The spaces a person sets aside, by the file each says it with at its root. */
+const PARKED = ['.claude/worktrees', '.git']
+
+/**
+ * The folders this session stands on: the one the session is in, the workspace
+ * around it, and the repos beside it. Both the branch line and the OpenSpec scan
+ * read this one answer, so the two can never disagree about what a repo is.
+ *
+ * A repo is any folder with a `.git` (a directory, or a submodule's pointer file)
+ * or an `openspec/`; no name list decides.
+ */
+export async function discoverOf($: EngineInterface, at?: string): Promise<Discovery> {
+  const cwd = at ?? (startCwd || (await $.session.cwd().catch(() => '')))
+
+  const { workspace, isLocal } = await workspaceOf($, cwd)
+  const repos: Repo[] = []
+  const seen = new Set<string>()
+
+
+  const add = (repo: Repo): void => {
+    if (seen.has(repo.path)) {
+      return
+    }
+
+    seen.add(repo.path)
+    repos.push(repo)
+  }
+
+  // A space the person set aside: its repos are not the ones being worked in,
+  // and a branch line that names them is a branch line about another project.
+  if (!isLocal) {
+    return { workspace, repos, isLocal }
+  }
+
+  // The session's own folder first: it is the one the person is working in, and
+  // its row stands for the space itself when that folder is the space.
+  if (await isRepo($, cwd)) {
+    add({ path: cwd, label: lastOf(cwd), isRoot: cwd === workspace })
+  }
+
+
+  if (await isRepo($, workspace) && !seen.has(workspace)) {
+    add({ path: workspace, label: lastOf(workspace), isRoot: true })
+  }
+
+
+  const beside: Repo[] = []
+
+  for (const entry of await listOf($, workspace)) {
+    if (entry.kind !== 'dir' || IGNORED.includes(entry.name)) {
+      continue
+    }
+
+    const path = `${workspace}/${entry.name}`
+
+    // A worktree's `.git` is a pointer: it is read for its branch like any repo.
+    if ((await isRepo($, path)) || (await isPointerDir($, path))) {
+      beside.push({ path, label: entry.name, isRoot: false })
+    }
+  }
+
+  for (const one of beside.sort((a, b) => a.label.localeCompare(b.label))) {
+    add(one)
+  }
+
+  return { workspace, repos, isLocal }
+}
+
+/**
+ * Where the session's space is, and whether it is one to read at all.
+ *
+ * The space is the session's own folder when it holds repos beside it; else the
+ * first folder above it (two levels at most) that holds them. A folder parked by
+ * a `.claude/worktrees` or `.git` marker file is somebody's set-aside clone, and
+ * its repos are not this project's.
+ */
+export async function workspaceOf($: EngineInterface, cwd: string): Promise<{ workspace: string; isLocal: boolean }> {
+  if (await parkedAt($, cwd) !== null) {
+    return { workspace: cwd, isLocal: false }
+  }
+
+  if (await holdsRepos($, cwd)) {
+    return { workspace: cwd, isLocal: true }
+  }
+
+  let dir = parentOf(cwd)
+  let level = 0
+
+  while (level < MAX_CLIMB) {
+    if (await parkedAt($, dir) !== null) {
+      return { workspace: cwd, isLocal: false }
+    }
+
+    if (await holdsRepos($, dir)) {
+      return { workspace: dir, isLocal: true }
+    }
+
+    const up = parentOf(dir)
+
+    if (up === dir) {
+      break
+    }
+
+    dir = up
+    level += 1
+  }
+
+  return { workspace: parentOf(cwd), isLocal: true }
+}
+
+/**
+ * Which marker file, if any, says this folder is a set-aside space.
+ *
+ * A folder that is itself a repo is never set aside: a worktree's own `.git` is a
+ * pointer file with the same name as one of these markers, and reading that as
+ * "somebody left this clone here" would hide every worktree from the panel.
+ */
+async function parkedAt($: EngineInterface, dir: string): Promise<string | null> {
+  if (dir === '' || dir === '/' || (await isPointerRepo($, dir))) {
+    return null
+  }
+
+  for (const marker of PARKED) {
+    if (await $.fs.stat(`${dir}/${marker}`).then(one => one.kind === 'file').catch(() => false)) {
+      return marker
+    }
+  }
+
+  return null
+}
+
+/** Whether this folder's `.git` is a pointer file (a worktree or a submodule). */
+async function isPointerRepo($: EngineInterface, dir: string): Promise<boolean> {
+  return $.fs
+    .stat(`${dir}/.git`)
+    .then(one => one.kind === 'file')
+    .catch(() => false)
+}
+
+/** Whether a folder is a space of its own: it holds repos beside it. A repo with
+ * nothing beside it belongs to the space above, not to a space of its own. */
+async function holdsRepos($: EngineInterface, dir: string): Promise<boolean> {
+  return dir !== '' && dir !== '/' && isWorkspace($, dir)
+}
+
+/** The folder a session opened in. Both the branch line and the OpenSpec list walk
+ * from it, so a `cd` mid-session never makes them describe different trees. */
+let startCwd = ''
+
+/** Keeps the folder a session opened in, for a read made before the engine speaks. */
+export function rememberStartCwd(cwd: string): void {
+  startCwd = cwd
+}
+
+/** Where a read should walk from: the folder the session opened in, or the live
+ * `session.cwd` for a read made before `session.start` spoke (a `ui.render` can
+ * land first). */
+
+
+/** Folders the branch line shows: root first, then the rest as discovered. */
+export async function branchesOf($: EngineInterface): Promise<Branch[]> {
+  const { repos } = await discoverOf($)
+
+  const out: Branch[] = []
+
+  for (const repo of repos) {
+    const branch = await branchAt($, repo.path)
+
+    if (branch !== '') {
+      out.push({
+        name: repo.isRoot ? '.' : repo.label,
+        folder: repo.label,
+        branch,
+        changes: await changesAt($, repo.path),
+      })
+    }
+  }
+
+  return out
+}
+
+/**
+ * Every change the session's folders hold, newest first, and why there are none
+ * when there are none.
+ *
+ * The walk starts from where the session opened, not from whatever `session.cwd`
+ * answers now: a folder changed mid-session would move what "this workspace" means
+ * under the person, which is how the list came to appear and vanish by turns.
+ */
+export async function scan($: EngineInterface): Promise<ScanOutcome> {
+  const cwd = startCwd
+
+  if (cwd === '') {
+    return { kind: 'failed' }
+  }
+
+  let found: Discovery
+
+  try {
+    found = await discoverOf($, cwd)
+  } catch {
+    return { kind: 'failed' }
+  }
+
+  if (!found.isLocal) {
+    return {
+      kind: 'skipped',
+      why: found.workspace === cwd ? '会话目录被标记为搁置的空间' : '会话目录所在的空间被搁置',
+    }
+  }
+
+  const { workspace, repos } = found
+  const folders: { path: string; label: string }[] = []
+
+  if (await isDir($, `${workspace}/openspec`) && !repos.some(one => one.path === workspace)) {
+    folders.push({ path: workspace, label: lastOf(workspace) })
+  }
+
+  for (const one of repos) {
+    folders.push({ path: one.path, label: one.label })
+  }
+
+  if (folders.length === 0) {
+    return { kind: 'skipped', why: '没有找到可扫描的仓库' }
+  }
+
   const all: SpecChange[] = []
+  let isUnread = false
 
-  for (const repo of await reposOf($, workspace)) {
+  for (const repo of folders) {
     const changesDir = `${repo.path}/openspec/changes`
 
-    for (const entry of await listOf($, changesDir)) {
+    // A folder that will not list is skipped, not fatal for the rest: one deleted
+    // repo must not blank the whole list. A walk where none listed is a failure.
+    const entries = await $.fs.list(changesDir).catch(() => null)
+
+    if (entries === null) {
+      isUnread = true
+      continue
+    }
+
+    for (const entry of entries) {
       if (entry.kind !== 'dir') {
         continue
       }
@@ -33,7 +299,17 @@ export async function scan($: EngineInterface): Promise<SpecChange[]> {
     }
   }
 
-  return all.sort((a, b) => b.mtime - a.mtime)
+  // Nothing read at all is a failed walk, not an empty workspace: an empty one
+  // says the folders are there and hold nothing, which is a different cue.
+  if (isUnread && all.length === 0) {
+    return { kind: 'failed' }
+  }
+
+  const labels = folders.map(one => one.label)
+
+  return all.length === 0
+    ? { kind: 'none', repos: labels }
+    : { kind: 'ok', changes: all.sort((a, b) => b.mtime - a.mtime), repos: labels }
 }
 
 export async function changeOf(
@@ -98,31 +374,6 @@ export async function changeOf(
     open,
     archivedOn,
   }
-}
-
-/**
- * The branch each folder of the workspace stands on, the workspace's own first.
- * Read from `.git/HEAD` itself: no process is run, and a worktree's pointer file
- * is followed by the same path.
- */
-export async function branchesOf($: EngineInterface): Promise<Branch[]> {
-  const workspace = await workspaceOf($)
-  const out: Branch[] = []
-  const own = await branchAt($, workspace)
-
-  if (own !== '') {
-    out.push({ name: '.', branch: own, changes: await changesAt($, workspace) })
-  }
-
-  for (const repo of await reposOf($, workspace)) {
-    const branch = await branchAt($, repo.path)
-
-    if (branch !== '') {
-      out.push({ name: repo.label, branch, changes: await changesAt($, repo.path) })
-    }
-  }
-
-  return out
 }
 
 /**
@@ -219,6 +470,14 @@ export async function gitdirOf($: EngineInterface, file: string): Promise<string
 }
 
 /** Which stretch a change belongs to: the one thing its numbers cannot say. */
+/** Whether a folder's `.git` is a pointer file: a worktree, or a submodule. */
+export async function isPointerDir($: EngineInterface, dir: string): Promise<boolean> {
+  return $.fs
+    .stat(`${dir}/.git`)
+    .then(one => one.kind === 'file')
+    .catch(() => false)
+}
+
 export function groupOf(one: SpecChange): Group {
   if (!one.hasTasks) {
     return 'bare'
@@ -231,37 +490,27 @@ export function groupOf(one: SpecChange): Group {
   return one.done < one.total ? 'doing' : 'ready'
 }
 
-/** The folder holding the repos: the session's cwd, or one above it. */
-export async function workspaceOf($: EngineInterface): Promise<string> {
-  const cwd = await $.session.cwd()
-
-  if (await isDir($, `${cwd}/openspec`)) {
-    return parentOf(cwd)
-  }
-
-  if (await isDir($, `${cwd}/sales-platform`)) {
-    return cwd
-  }
-
-  const parent = parentOf(cwd)
-
-  return (await isDir($, `${parent}/sales-platform`)) ? parent : parent
+/**
+ * Whether a folder is one this panel reads: git records it (a `.git` directory,
+ * a worktree's or submodule's pointer file) or it carries an `openspec/`.
+ */
+export async function isRepo($: EngineInterface, dir: string): Promise<boolean> {
+  return (await $.fs.stat(`${dir}/.git`).catch(() => null)) !== null || isDir($, `${dir}/openspec`)
 }
 
-export async function reposOf($: EngineInterface, workspace: string): Promise<{ path: string; label: string }[]> {
-  const out: { path: string; label: string }[] = []
+/** Whether a folder holds repos beside it: the space a workspace root stands for. */
+export async function isWorkspace($: EngineInterface, dir: string): Promise<boolean> {
+  if (dir === '' || dir === '/') {
+    return false
+  }
 
-  for (const one of await listOf($, workspace)) {
-    if (one.kind === 'dir' && REPO_NAMES.includes(one.name) && (await isDir($, `${workspace}/${one.name}/openspec`))) {
-      out.push({ path: `${workspace}/${one.name}`, label: one.name })
+  for (const entry of await listOf($, dir)) {
+    if (entry.kind === 'dir' && entry.name !== 'node_modules' && (await isRepo($, `${dir}/${entry.name}`))) {
+      return true
     }
   }
 
-  if (out.length === 0 && (await isDir($, `${workspace}/openspec`))) {
-    out.push({ path: workspace, label: lastOf(workspace) })
-  }
-
-  return out
+  return false
 }
 
 export async function listOf($: EngineInterface, path: string) {

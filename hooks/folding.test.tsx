@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { fold, rowsOf } from './format'
+import { cellsOf, fold, rowsOf } from './format'
 
 /**
  * A detail that folds its long bodies to the screen, and opens one whole on
@@ -152,16 +152,16 @@ test('the whole answer opens on request, and steps back to the detail', async ($
   await ui.press({ key: await rowKey(ui) })
   await ui.press({ key: 'full-answer' })
 
-  // The whole body, under its own heading, with the way back.
-  expect((await ui.find({ type: 'Text', text: /── 回答（共 200 行）/ }))?.text).toContain('共 200 行')
-  expect(await ui.find({ type: 'Button', key: 'full-detail-back' })).toBeDefined()
+  // The whole body, its size on the card title, and the way back.
+  const title = (await ui.findAll({ type: 'Text' })).map(one => String((one as { text?: string }).text ?? '')).find(one => one.includes('共 200 行'))
+  expect(title ?? '').toContain('共 200 行')
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
   expect((await textsOf(ui)).split('\n').some(row => row === '答200行')).toBe(true)
 
-  await ui.press({ key: 'full-detail-back' })
+  await ui.press({ key: 'back' })
 
-  // Back on the detail: the fold is there again, and no full body.
+  // Back on the detail: the fold is there again, and the shared way out with it.
   expect(await ui.find({ type: 'Text', text: /共 200 行，已显示/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'full-detail-back' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
 
   await ui.unmount()
@@ -178,10 +178,10 @@ test('b steps back from the whole body to the detail, then to the list', async (
   await ui.press({ key: 'tab-conversation' })
   await ui.press({ key: await rowKey(ui) })
   await ui.press({ key: 'full-answer' })
-  expect(await ui.find({ type: 'Button', key: 'full-detail-back' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
 
   // `b` is the same door the button opens: the engine reports the element that took it.
-  await ui.press({ key: 'full-detail-back' })
+  await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
 
   await ui.press({ key: 'back' })
@@ -202,9 +202,66 @@ test('the whole-body view is the whole pane: no tabs to wander off by', async ($
   await ui.press({ key: await rowKey(ui) })
   await ui.press({ key: 'full-answer' })
 
-  expect(await ui.find({ type: 'Button', key: 'full-detail-back' })).toBeDefined()
+  // No tabs to wander off by; the one door out is the shared back.
   expect(await ui.find({ type: 'Button', key: 'tab-mcp' })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'back' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('an answer is a section of its own: marked at the left, indented, never cut', async ($, on) => {
+  quiet(on)
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ origin: { kind: 'composer' }, wait: false, text: '你好？' })
+  await $.turn.complete({
+    turnId: 'turn-1',
+    reason: 'answer',
+    durationMs: 3_000,
+    answer: '如果需要我干活，直接说要做的事就行 —— 比如：\n- 前端页面开发\n- 老系统重构核对',
+    isAborted: false,
+  } as never)
+
+  const ui = await $.ui.mount({ ...pane(40), surface: 'terminal' })
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: await rowKey(ui) })
+
+  const texts = ((await ui.findAll({ type: 'Text' })) as { props?: { wrap?: string }; text?: string }[]).map(one => ({
+    text: String(one.text ?? ''),
+    wrap: one.props?.wrap,
+  }))
+
+  // The section's left edge is drawn, and its body sits under its heading.
+  expect(texts.some(one => one.text.includes('▏ 💬 回答'))).toBe(true)
+  expect(texts.some(one => one.text.includes('▏   如果需要我干活'))).toBe(true)
+
+  // Nothing in a section is cut at the edge: it wraps, or it was short enough.
+  expect(texts.filter(one => one.wrap === 'truncate-end' && one.text !== '').map(one => one.text)).toEqual([])
+
+  await ui.unmount()
+})
+
+test('every detail field starts on the same cell, emoji or not', async ($, on) => {
+  quiet(on)
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ origin: { kind: 'composer' }, wait: false, text: '你好？' })
+
+  const ui = await $.ui.mount({ ...pane(40), surface: 'terminal' })
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: await rowKey(ui) })
+
+  const rows = ((await ui.findAll({ type: 'Text' })) as { text?: string }[]).map(one => String(one.text ?? ''))
+  // The label column is one width: 🕒 时间 and 🏷️ 类型 are padded to the same
+  // number of cells, so the values beside them begin on the same cell.
+  // The label alone (the row that holds nothing but the padded label), not the
+  // whole field line with its value.
+  const time = rows.find(one => /^🕒 时间\s*$/.test(one.trim()))
+  const kind = rows.find(one => /^🏷️ 类型\s*$/.test(one.trim()))
+  expect(time).toBeDefined()
+  expect(kind).toBeDefined()
+  // Both labels are padded into one column, so they take the same cells.
+  expect(cellsOf(time ?? '')).toBe(cellsOf(kind ?? ''))
 
   await ui.unmount()
 })

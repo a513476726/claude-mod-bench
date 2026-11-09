@@ -1,0 +1,55 @@
+version: 1
+
+project:
+  name: bench
+  kind: other          # Claude Code 进程内 mod；非 web 前后端，面板 UI + 本地 git/文件读取
+
+source:
+  roots:
+    - hooks            # 全部业务逻辑：面板绘制、状态、扫描、对话记录
+  apiRoots: []         # 无 HTTP 接口；外部交互走 claude-code 引擎 API 与本地 git 命令
+
+docs:
+  legacyRoot: docs/features          # 旧功能文档树（按页签），仅作迁移与人工背景来源
+  featureRoot: docs/ai-features      # 正式 Spec 根目录（开发期功能维度）
+  featureTestsRoot: docs/ai-feature-tests  # 成对测试计划根目录
+  moduleIndex: README.md
+  featureIndex: README.md
+  legacyFeatureFile: README.md
+  specFilePattern: "<type>-<module>-<feature>-<YYYYMMDD>.md"
+  defaultType: feat
+  owner: 待确认
+  lastEditor: AI
+
+naming:
+  # 业务域/模块 → module slug
+  moduleSlugs:
+    开发者工作台/OpenSpec 变更追踪: openspec-tracking
+    开发者工作台/对话记录: conversation-log
+    开发者工作台/分支状态: branch-status
+  # 功能名 → feature slug（功能不得复用模块名）
+  featureSlugs:
+    变更扫描与分段: change-scan
+    单项目仓库发现: single-repo-discovery
+    仓库自动发现与轮询: repo-discovery-poll
+    会话用量与工具统计: session-stats
+    工具调用下钻: tool-drilldown
+
+structure:
+  routing: static
+  pageEntry: hooks/panes.tsx
+
+exclude:
+  - hooks/config.ts
+
+review:
+  roleFile: .skill-config/feature-doc-regression/roles/doc-regression-reviewer.md
+  enabled: true
+
+db:
+  connect: 无数据库
+
+regression:
+  defaultMode: frontend
+  incremental: true
+  updateIndex: true

@@ -46,7 +46,7 @@ test('an MCP call is kept under the server that served it', async ($, on) => {
   await $.tool.call({
     tool: 'mcp__oracle-apex__oracle_query',
     tool_use_id: 'call-1',
-    query: 'SELECT * FROM SALES_NEW.HZ_SALES_CUSTOMER',
+    query: 'SELECT * FROM APP.ORDERS',
     mcp: { name: 'oracle-apex', source: 'user' },
   })
 

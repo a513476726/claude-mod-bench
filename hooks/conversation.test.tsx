@@ -59,17 +59,21 @@ test('a round cut short has no cost to report', () => {
   expect(isTroubled(list[0]!)).toBe(true)
 })
 
+const note = (isOk: boolean, summary = 'x') => ({ at, ms: 4, isOk, summary, detail: '', result: '' })
+
 test('tools are counted by name, and their failures with them', () => {
   let list = startTurn([], { id: 't1', kind: 'input', at, text: '一' })
 
-  list = attachTool(list, 't1', 'Read', true)
-  list = attachTool(list, 't1', 'Bash', false)
-  list = attachTool(list, 't1', 'Read', true)
+  list = attachTool(list, 't1', 'Read', note(true, 'a.ts'))
+  list = attachTool(list, 't1', 'Bash', note(false, 'git status'))
+  list = attachTool(list, 't1', 'Read', note(true, 'b.ts'))
 
-  expect(list[0]?.tools).toEqual([
+  expect(list[0]?.tools.map(one => ({ name: one.name, count: one.count, fails: one.fails }))).toEqual([
     { name: 'Read', count: 2, fails: 0 },
     { name: 'Bash', count: 1, fails: 1 },
   ])
+  // Each call is kept on its own: two Reads are two lines to drill into.
+  expect(list[0]?.tools[0]?.notes.map(one => one.summary)).toEqual(['a.ts', 'b.ts'])
   expect(isTroubled(list[0]!)).toBe(true)
 })
 
@@ -79,7 +83,7 @@ test('a tool on a round that is closed leaves every round alone', () => {
     durationMs: 1,
     answer: '',
   })
-  const list = attachTool(closed, 'nope', 'Read', true)
+  const list = attachTool(closed, 'nope', 'Read', note(true))
 
   expect(list[0]?.tools).toEqual([])
 })
