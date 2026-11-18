@@ -1,4 +1,5 @@
-import type { Call, SoundSettings, SpecChange, ToolNote, Turn } from '../types'
+import type { AgentRow, AgentStatus, Call, SoundSettings, SpecChange, ToolNote, Turn } from '../types'
+import { sortAgents } from './agents'
 import { ageColOf, agoOf, cellsOf, endClip, kmOf, padCells, spanOf, timeOf, whenOf } from './format'
 import { isTroubled, statsOf } from './conversation'
 import { failuresOf, groupFailures, isLooping, isToolLooping } from './failure'
@@ -640,9 +641,47 @@ function callItems(all: Call[], width: number): Item[] {
   })
 }
 
+/** The colour each agent status speaks with; the word itself comes from `strings`. */
+export const AGENT_TONE: Record<AgentStatus, Tone> = {
+  pending: 'warning',
+  running: 'claude',
+  waiting: 'warning',
+  idle: 'subtle',
+  completed: 'success',
+  failed: 'error',
+  killed: 'error',
+}
+
+/**
+ * The roster as rows: status word, type, description, parent, how long it has
+ * run and how many tools it called. The words for the status come from the
+ * language table, so the row and the detail agree.
+ */
+export function agentItemsOf(
+  list: readonly AgentRow[],
+  now: number,
+  status: Record<AgentStatus, string>,
+): Item[] {
+  return sortAgents(list).map(one => {
+    const ended = one.endedAt ?? now
+
+    return {
+      id: one.id,
+      tag: status[one.status],
+      tone: AGENT_TONE[one.status],
+      name: one.type,
+      summary: one.description,
+      repo: one.parentId,
+      age: spanOf(Math.max(0, ended - one.startedAt)),
+      count: one.toolCalls,
+      line: `${status[one.status]}  ${one.type}  ${one.description}`,
+      detailLines: [],
+    }
+  })
+}
+
 /** The alert switches, in the order the sounds page draws them: the one table both
- * the rows and the page read, so no switch is named twice in two words. */
-export const SOUNDS: { key: keyof SoundSettings; label: string }[] = [
+ * the rows and the page read, so no switch is named twice in two words. */export const SOUNDS: { key: keyof SoundSettings; label: string }[] = [
   { key: 'isOn', label: '总开关' },
   { key: 'decision', label: '需要决策' },
   { key: 'done', label: '任务完成' },

@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, RenderSurface } from 'claude-code'
 
-import type { Branch, Call, Meter, ScanState, SoundSettings, SpecChange, Turn } from '../types'
+import type { AgentRow, Branch, Call, Meter, ScanState, SoundSettings, SpecChange, Turn } from '../types'
+import { closeAgent, reconcileAgents, tallyAgentTool, upsertAgent } from './agents'
 import {
   NOISE_PROMPT,
   attachTool,
@@ -30,6 +31,8 @@ import {
   type Prompt,
 } from './prompts'
 import { branchesOf, rememberStartCwd, scan, type ScanOutcome } from './scan'
+import { reportOf } from './report'
+import { langOf, stringsOf } from './strings'
 
 const PANE = 'bench'
 const TITLE = '开发者工作台'
@@ -97,6 +100,18 @@ const editor = atom(
   { plugin: 'bench', key: 'editor' } as const,
   { current: '终端内', options: [] } as { current: string; options: string[]; error?: string },
   { shape: 'editor-1' },
+)
+/** The session's subagents and teammates, one row each. */
+const agents = atom({ plugin: 'bench', key: 'agents' } as const, { list: [] } as { list: AgentRow[] }, {
+  shape: 'agents-1',
+})
+/** The language the panel speaks, read from `LANG` at the session's start. */
+const lang = atom({ plugin: 'bench', key: 'lang' } as const, 'zh' as 'zh' | 'en', { shape: 'lang-1' })
+/** The transcript read for one agent's detail page, kept apart from the roster. */
+const agentMessages = atom(
+  { plugin: 'bench', key: 'agentMessages' } as const,
+  { id: '', lines: [] } as { id: string; lines: string[]; isTruncated?: boolean; error?: string },
+  { shape: 'agent-msg-1' },
 )
 /** The saved prompts, in display order, and why the file could not be read. */
 const prompts = atom({ plugin: 'bench', key: 'prompts' } as const, { list: [] } as PromptStore, { shape: 'prompts-1' })
@@ -294,9 +309,70 @@ async function refreshUsage(
   )
 }
 
+/** How many transcript lines one agent's detail keeps: enough to see its shape. */
+const AGENT_EXCERPT_LINES = 40
+
+/**
+ * One agent's transcript, read on demand for its detail page: the last lines,
+ * cut short and marked, or the engine's own refusal when it will not hand them
+ * over. A reading failure never touches the agent itself.
+ */
+async function loadAgentMessages($: EngineInterface, id: string): Promise<void> {
+  try {
+    const result = await $.session.messages({ agentId: id })
+
+    if (!Array.isArray(result)) {
+      await update($, agentMessages, () => ({ id, lines: [], error: '无法读取该代理的对话' }))
+
+      return
+    }
+
+    const lines = result
+      .map(one => `${one.role === 'user' ? '你' : '代理'}：${one.text.replace(/\s+/g, ' ').trim()}`)
+      .filter(one => !one.endsWith('：'))
+    const kept = lines.slice(-AGENT_EXCERPT_LINES).map(one => (one.length > 200 ? `${one.slice(0, 200)}…` : one))
+
+    await update($, agentMessages, () => ({
+      id,
+      lines: kept,
+      ...(lines.length > kept.length ? { isTruncated: true } : {}),
+    }))
+  } catch (thrown) {
+    await update($, agentMessages, () => ({
+      id,
+      lines: [],
+      error: `无法读取该代理的对话：${String(thrown instanceof Error ? thrown.message : thrown)}`,
+    }))
+  }
+}
+
+/** `YYYYMMDD-HHmm`, the stamp a report's file name carries. */
+function stampOf(ms: number): string {
+  const at = new Date(ms)
+  const two = (value: number) => String(value).padStart(2, '0')
+
+  return `${at.getFullYear()}${two(at.getMonth() + 1)}${two(at.getDate())}-${two(at.getHours())}${two(at.getMinutes())}`
+}
+
+/** A report path that does not overwrite an earlier export: `-2`, `-3`, ... */
+async function reportPathOf($: EngineInterface, root: string, now: number): Promise<string> {
+  const base = `bench-report-${stampOf(now)}`
+  let path = `${root}/${base}.md`
+
+  for (let at = 2; ; at += 1) {
+    // Only a file the engine actually names holds the name; a `deny` is a clear path.
+    const held = await $.fs.stat(path).catch(() => null)
+
+    if (held === null || 'deny' in held) {
+      return path
+    }
+
+    path = `${root}/${base}-${at}.md`
+  }
+}
+
 /** The editor choices the plugin's config row declares; a host that cannot list
- * them keeps the current value and says why the list is empty. */
-async function readEditorChoices($: EngineInterface): Promise<{ options: string[]; error?: string }> {
+ * them keeps the current value and says why the list is empty. */async function readEditorChoices($: EngineInterface): Promise<{ options: string[]; error?: string }> {
   try {
     const rows = await $.config.list()
     const row = rows.find(one => one.key === 'bench.editor')
@@ -459,6 +535,7 @@ function withPrompts<T>(run: () => Promise<T>): Promise<T> {
 /** Adds one other-tab command beside the pane's own. */
 async function registerCommands($: EngineInterface): Promise<void> {
   await $.command.register({ name: 'panel-prompt-add', description: '收藏一条常用 prompt', argumentHint: '<文本>' })
+  await $.command.register({ name: 'panel-export', description: '导出本会话 Markdown 报告' })
 }
 
 
@@ -500,6 +577,9 @@ export const register: Register = (on, options) => {
     }
 
     await resetEditor($, options)
+
+    const language = langOf(await $.env.get('LANG').catch(() => undefined))
+    await update($, lang, () => language)
 
     // The engine itself says why a pane waits: a floor it fell under, or a surface
     // that places none. Guessing at the width hid the real cause once already.
@@ -569,6 +649,34 @@ export const register: Register = (on, options) => {
       return { text: `已收藏${scope === 'project' ? '（项目）' : ''}：${firstLineOf(text)}` }
     }))
 
+  // One Markdown report of the session, written beside the project: no network,
+  // no model call, and a name that never overwrites an earlier export.
+  on('command.run', { command: 'panel-export' }, async $ => {
+    const words = stringsOf(await read($, lang))
+
+    try {
+      const root = await $.session.root()
+      const now = await $.clock.now()
+      const usage = await $.session.usage().catch(() => null)
+      const path = await reportPathOf($, root, now)
+      const text = reportOf({
+        project: root.split('/').filter(one => one !== '').pop() ?? root,
+        startedAt: usage?.startedAt ?? now,
+        now,
+        turns: await read($, turns),
+        usd: (await read($, meter)).usd,
+        ctx: await read($, ctx),
+        changes: await read($, changes),
+      })
+
+      await $.fs.write(path, text)
+
+      return { text: `${words.exportReport.done(path)}\n${words.exportReport.sensitive}` }
+    } catch (thrown) {
+      return { text: words.exportReport.failed(String(thrown instanceof Error ? thrown.message : thrown)) }
+    }
+  })
+
   // A turn the person did not type (a continuation) still opens a round, so its
   // tools and answer have somewhere to go; a subagent's turn is not the person's.
   on('turn.start', async ($, e, next) => {
@@ -580,6 +688,32 @@ export const register: Register = (on, options) => {
           ? startTurn(list, { id: String(e.turnId), kind: 'continuation', at, text: String(e.text ?? '') })
           : list,
       )
+    } else {
+      // A subagent's loop started (or resumed) a round: its row is running.
+      const id = String(e.agentId)
+      const at = await $.clock.now()
+
+      await update($, agents, prev => ({
+        list: prev.list.some(one => one.id === id)
+          ? prev.list.map(one =>
+              one.id === id && !['completed', 'failed', 'killed'].includes(one.status)
+                ? { ...one, status: 'running' as const, startedAt: one.startedAt === 0 ? at : one.startedAt }
+                : one,
+            )
+          : [
+              ...prev.list,
+              {
+                id,
+                type: '—',
+                description: '',
+                status: 'running' as const,
+                startedAt: at,
+                toolCalls: 0,
+                toolFails: 0,
+                lastText: '',
+              },
+            ],
+      }))
     }
 
     return next(e)
@@ -602,6 +736,15 @@ export const register: Register = (on, options) => {
 
         return open === undefined ? list : closeTurn(list, open.id, end)
       })
+    } else {
+      // A subagent settled: its row keeps the answer and the end time.
+      const id = String(e.agentId)
+      const at = await $.clock.now()
+      const answer = String((e as { answer?: unknown }).answer ?? '')
+
+      await update($, agents, prev => ({
+        list: closeAgent(prev.list, id, e.reason === 'answer' ? 'completed' : 'failed', at, answer),
+      }))
     }
 
     // The measurement normally lands on its own; a host that omits it (or races
@@ -624,10 +767,10 @@ export const register: Register = (on, options) => {
     const callStartedAt = await $.clock.now()
 
     const ran = await next(e)
+    const isDenied = 'deny' in ran && ran.deny !== undefined
+    const isOk = !isDenied && !('isError' in ran && ran.isError === true)
 
     if (e.agentId === undefined && wire !== 'AskUserQuestion') {
-      const isDenied = 'deny' in ran && ran.deny !== undefined
-      const isOk = !isDenied && !('isError' in ran && ran.isError === true)
       const finishedAt = await $.clock.now()
       const note = {
         at: callStartedAt,
@@ -644,6 +787,12 @@ export const register: Register = (on, options) => {
 
         return open === undefined || list.length !== openedAt ? list : attachTool(list, open.id, nameOf(wire), note)
       })
+    }
+
+    if (e.agentId !== undefined) {
+      const id = String(e.agentId)
+
+      await update($, agents, prev => ({ list: tallyAgentTool(prev.list, id, isOk) }))
     }
 
     if (!wire.startsWith('mcp__')) {
@@ -670,7 +819,6 @@ export const register: Register = (on, options) => {
     await update($, calls, list => [...list, call].slice(-MAX_CALLS))
 
     const callFinishedAt = await $.clock.now()
-    const isOk = !('deny' in ran && ran.deny !== undefined) && !('isError' in ran && ran.isError === true)
     const text = 'text' in ran && typeof ran.text === 'string' ? ran.text : isOk ? '' : 'failed'
 
     await update($, calls, list =>
@@ -685,6 +833,41 @@ export const register: Register = (on, options) => {
     $.ui.log(`bench: ${String((e as { tool?: string }).tool ?? 'a call')} 未能记录`)
 
     return next(e)
+  })
+
+  // ------------------------------------------------------------- agent roster
+
+  // A spawn starts a row; the engine's answer carries the id every later event
+  // uses. A roster that cannot record it never touches the spawn itself.
+  on('agent.spawn', async ($, e, next) => {
+    const ran = await next(e)
+
+    try {
+      const spawned = ran as { agentId?: string; teammateId?: string }
+
+      if (spawned.agentId !== undefined) {
+        const at = await $.clock.now()
+
+        await update($, agents, prev => ({
+          list: upsertAgent(prev.list, {
+            id: spawned.agentId as string,
+            teammateId: spawned.teammateId,
+            type: String(e.subagentType ?? '—'),
+            description: String(e.description ?? ''),
+            parentId: e.parentAgentId === undefined ? undefined : String(e.parentAgentId),
+            status: 'running',
+            startedAt: at,
+            toolCalls: 0,
+            toolFails: 0,
+            lastText: '',
+          }),
+        }))
+      }
+    } catch (thrown) {
+      $.ui.log(`bench: 代理花名册未记录 — ${String(thrown instanceof Error ? thrown.message : thrown)}`)
+    }
+
+    return ran
   })
 
   // ------------------------------------------------------------ conversation
@@ -753,8 +936,9 @@ export const register: Register = (on, options) => {
     const ready = list.filter(one => one.hasTasks && one.done >= one.total && !one.isArchived).length
     const broken = list.filter(one => one.hasTasks && one.done < one.total && one.isArchived).length
     const awaiting = ready + broken
-    // Iteration 4 fills the roster; until then the band says nothing about agents.
-    const running = 0
+    // What still counts as under way: a spawn not yet settled, waiting included.
+    const roster = await read($, agents)
+    const running = roster.list.filter(one => one.status === 'running' || one.status === 'pending' || one.status === 'waiting').length
     const room = Math.max(20, e.props.bodyColumns ?? 80)
     const live = await read($, ctx)
     const reading = ctxOf(live.tokens, live.window)
@@ -804,6 +988,9 @@ export const register: Register = (on, options) => {
         meter: await read($, meter),
         breakdown: await read($, breakdown),
         editor: await read($, editor),
+        agents: (await read($, agents)).list,
+        lang: await read($, lang),
+        agentMessages: await read($, agentMessages),
         prompts: await read($, prompts),
         branches: await read($, branches),
         diff: await read($, diff),
@@ -813,7 +1000,18 @@ export const register: Register = (on, options) => {
       const actions = {
         setView: (next: PaneState) => update($, view, () => next).then(() => undefined),
         navigate: (next: PaneState) => navigateView($, next),
-        navigateTab: (next: PaneState) => navigate($, { view: { ...next, pendingDelete: null }, diff: null, file: null }),
+        navigateTab: async (next: PaneState) => {
+          // Entering the roster asks the engine what it still lists, then keeps
+          // every row it already has: a dropped agent is not a deleted one.
+          if (next.tab === 'agent') {
+            const now = await $.clock.now()
+            const seen = await $.agent.list().catch(() => [])
+
+            await update($, agents, prev => ({ list: reconcileAgents(prev.list, seen, now) }))
+          }
+
+          await navigate($, { view: { ...next, pendingDelete: null }, diff: null, file: null })
+        },
         toggleSound: async (key: keyof SoundSettings) => {
           await update($, sounds, prev => ({ ...prev, [key]: !prev[key] }))
         },
@@ -877,6 +1075,11 @@ export const register: Register = (on, options) => {
           } catch (thrown) {
             await flash($, `无法切换：${String(thrown instanceof Error ? thrown.message : thrown)}`)
           }
+        },
+        /** The engine's list is asked on the way in; the row opens with what it has. */
+        openAgent: async (next: PaneState, id: string) => {
+          await loadAgentMessages($, id)
+          await navigateView($, next)
         },
         refreshBreakdown: () => loadBreakdown($),
         /** The closeout's one act: prefill the box, never submit it. */

@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
+import { cellsOf } from './format'
+
 const PANE = {
   plugin: 'bench',
   component: 'Pane',
@@ -27,6 +29,14 @@ function quiet(on: On, onOpen?: () => void) {
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: '/nowhere' }))
+  on('session.cwd', () => ({ value: '/nowhere' }))
+  // One repo with no openspec/: the first-run page every project starts on.
+  on('fs.stat', (_, e) =>
+    e.path === '/nowhere' || e.path === '/nowhere/.git'
+      ? { value: { kind: 'dir', size: 0, isLink: false, mtimeMs: 1 } }
+      : { deny: 'ENOENT' },
+  )
+  on('fs.list', () => ({ value: [] }))
 }
 
 test('the pane draws its titles and says when there is nothing to show', async ($, on) => {
@@ -646,4 +656,268 @@ test('a host without a ledger keeps the dash and never invents a window', async 
   expect(label).not.toContain('5h')
   expect(label).not.toContain('7d')
   expect(label).not.toContain('0%')
+})
+
+/** A spawn the test can start, and the roster the page reads. */
+function spawning(on: On, id: string, type = 'Explore', description = '看依赖树') {
+  on('agent.spawn', () => ({ agentId: id, model: 'haiku' }))
+  on('agent.list', () => ({ value: [] }))
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  on('turn.start', () => ({ turnId: 't' }))
+  on('turn.complete', () => ({ text: 'ok' }))
+}
+
+async function textsIn(ui: { findAll: (query: { type: string }) => Promise<unknown[]> }) {
+  const found = (await ui.findAll({ type: 'Text' })) as { text?: unknown }[]
+
+  return found.map(one => String(one.text ?? '')).join('\n')
+}
+
+test('a spawn opens a row, its round and tools update it, and the main turns stay clean', async ($, on) => {
+  quiet(on)
+  spawning(on, 'a1')
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ tool_use_id: 't', prompt: 'go', description: '看依赖树', subagentType: 'Explore' } as never)
+
+  await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: 'a.ts', agentId: 'a1' } as never)
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: '' } as never)
+  await $.turn.complete({ turnId: 't1', agentId: 'a1', reason: 'answer', answer: '看完了', usage: undefined } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-agent' })
+
+  const page = await textsIn(ui)
+
+  expect(page).toContain('完成')
+  expect(page).toContain('Explore')
+  expect(page).toContain('工具 1')
+
+  // A subagent's round is not the person's: the conversation stays empty.
+  await ui.press({ key: 'tab-conversation' })
+  expect(await textsIn(ui)).toContain('本会话还没有对话')
+
+  await ui.unmount()
+})
+
+test('engine list fills a gap and never deletes a local row', async ($, on) => {
+  quiet(on)
+  on('agent.spawn', () => ({ agentId: 'gone', model: 'haiku' }))
+  on('agent.list', () => ({
+    value: [{ id: 'new', type: 'Plan', description: '引擎里的新代理', status: 'running', parentId: undefined }],
+  }))
+  on('turn.complete', () => ({ text: 'ok' }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ tool_use_id: 't', prompt: 'go', description: '本地行', subagentType: 'Explore' } as never)
+  await $.turn.complete({ turnId: 't', agentId: 'gone', reason: 'answer', answer: '好了' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-agent' })
+
+  const page = await textsIn(ui)
+
+  expect(page).toContain('本地行')
+  expect(page).toContain('完成')
+  expect(page).toContain('引擎里的新代理')
+
+  await ui.unmount()
+})
+
+test('an agent detail reads its transcript and offers no way to steer it', async ($, on) => {
+  quiet(on)
+  spawning(on, 'a1')
+  on('session.messages', () => ({ value: [{ role: 'assistant', text: '摘录一', toolUses: [] }] }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ tool_use_id: 't', prompt: 'go', description: '看依赖树', subagentType: 'Explore' } as never)
+  await $.turn.complete({ turnId: 't', agentId: 'a1', reason: 'answer', answer: '最后的回答' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-agent' })
+  await ui.press({ key: 'row-a1' })
+
+  const page = await textsIn(ui)
+
+  expect(page).toContain('类型')
+  expect(page).toContain('最后输出')
+  expect(page).toContain('最后的回答')
+  expect(page).toContain('摘录一')
+
+  const buttons = (await ui.findAll({ type: 'Button' })) as { props?: { key?: string } }[]
+  const keys = buttons.map(one => String(one.props?.key ?? ''))
+
+  expect(keys.some(one => /kill|stop|send|restart/i.test(one))).toBe(false)
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Button', key: 'row-a1' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a transcript the engine will not hand over says so', async ($, on) => {
+  quiet(on)
+  spawning(on, 'a1')
+  on('session.messages', () => ({ deny: 'no transcript' }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ tool_use_id: 't', prompt: 'go', description: '看依赖树', subagentType: 'Explore' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-agent' })
+  await ui.press({ key: 'row-a1' })
+
+  expect(await textsIn(ui)).toContain('无法读取该代理的对话')
+
+  await ui.unmount()
+})
+
+test('the roster lists three agents with their state, and fits 80, 40 and 24 columns', async ($, on) => {
+  quiet(on)
+  on('agent.spawn', (_, e) => ({ agentId: String(e.tool_use_id), model: 'haiku' }))
+  on('agent.list', () => ({ value: [] }))
+  on('tool.call', () => ({ result: {}, text: 'ok' }))
+  on('turn.start', () => ({ turnId: 't' }))
+  on('turn.complete', () => ({ text: 'ok' }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  for (const [id, description] of [['a', '看依赖'], ['b', '找测试'], ['c', '写总结']] as const) {
+    await $.agent.spawn({ tool_use_id: id, prompt: 'go', description, subagentType: 'Explore' } as never)
+  }
+
+  await $.turn.complete({ turnId: 't', agentId: 'c', reason: 'answer', answer: '写完' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-agent' })
+
+  for (const id of ['a', 'b', 'c']) {
+    expect(await ui.find({ type: 'Button', key: `row-${id}` })).toBeDefined()
+  }
+
+  const page = await textsIn(ui)
+  expect(page).toContain('运行')
+  expect(page).toContain('完成')
+  expect(page).toContain('看依赖')
+
+  await ui.unmount()
+
+  for (const columns of [80, 40, 24]) {
+    const narrow = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+
+    for (const one of (await narrow.findAll({ type: 'Text' })) as { text?: string }[]) {
+      expect(cellsOf(String(one.text ?? ''))).toBeLessThanOrEqual(columns)
+    }
+
+    await narrow.unmount()
+  }
+})
+
+test('a project with no OpenSpec still opens every page with content', async ($, on) => {
+  quiet(on)
+  measuring(on, () => ({ tokens: 620_000, window: 1_000_000 }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  // The changes page says what is missing, not blank.
+  expect(await textsIn(ui)).toContain('这个项目没有 openspec/changes')
+
+  // The session page still has its readings.
+  await ui.press({ key: 'tab-conversation' })
+  const session = await textsIn(ui)
+  expect(session).toContain('CTX 62%')
+  expect(session).toContain('暂无用量')
+
+  // More always has its three doors.
+  await ui.press({ key: 'tab-more' })
+  expect(await textsIn(ui)).toContain('编辑器')
+
+  await ui.unmount()
+})
+
+test('an english environment says the same surfaces in English', async ($, on) => {
+  quiet(on)
+  on('env.get', () => ({ value: 'en_US.UTF-8' }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect(await textsIn(ui)).toContain('This project has no openspec/changes.')
+
+  await ui.press({ key: 'tab-agent' })
+  expect(await textsIn(ui)).toContain('No subagents in this session yet.')
+
+  await ui.unmount()
+})
+
+/** A project root the export can write to, and every file written. */
+function exportWorld(on: On, stat: (path: string) => boolean, denyWrite = false) {
+  const writes: { path: string; text: string }[] = []
+
+  mock.clock(on, { now: 1_700_000_000_000 })
+  on('command.register', () => ({ value: { command: 'panel' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.root', () => ({ value: '/proj' }))
+  on('env.get', () => ({ value: '/home/tester' }))
+  on('fs.read', () => ({ deny: 'ENOENT' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.stat', (_, e) => (stat(e.path) ? { value: { kind: 'file', size: 1, isLink: false, mtimeMs: 1 } } : { deny: 'ENOENT' }))
+  on('fs.write', (_, e) => {
+    if (denyWrite) return { deny: 'EACCES' }
+
+    writes.push({ path: e.path, text: e.text })
+
+    return { value: undefined }
+  })
+
+  return writes
+}
+
+test('the export writes a Markdown report with the warning, never overwriting', async ($, on) => {
+  const writes = exportWorld(on, path => path.includes('bench-report-') && !path.endsWith('-2.md'))
+
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+
+  const reply = await $.command.run({ command: 'panel-export' } as never)
+
+  expect(writes).toHaveLength(1)
+  expect(writes[0]?.path).toMatch(/^\/proj\/bench-report-\d{8}-\d{4}-2\.md$/)
+  expect(writes[0]?.text).toContain('# proj · 会话报告')
+  expect(reply.text).toContain(writes[0]?.path ?? '')
+  expect(reply.text).toContain('报告含完整 prompt 与工具结果，请自行检查敏感信息')
+})
+
+test('an export that cannot write says why and does not throw', async ($, on) => {
+  exportWorld(on, () => false, true)
+
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+
+  const reply = await $.command.run({ command: 'panel-export' } as never)
+
+  expect(reply.text).toContain('导出失败')
+})
+
+test('without changes the band is the context reading, and a running agent is counted', async ($, on) => {
+  readyBand(on)
+  on('agent.spawn', () => ({ agentId: 'a1', model: 'haiku' }))
+
+  await $.session.start({ cwd: '/ws/app', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ tool_use_id: 't', prompt: 'go', description: '跑一下', subagentType: 'Explore' } as never)
+
+  const band = await bandAt($, 80)
+  const line = (await band.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('')
+
+  expect(line).toContain('待收尾 1')
+  expect(line).toContain('代理 1')
+
+  await band.unmount()
 })

@@ -156,6 +156,28 @@ export type Meter = {
   rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[]
 }
 
+/** Where one agent's own loop stands. */
+export type AgentStatus = 'pending' | 'running' | 'waiting' | 'idle' | 'completed' | 'failed' | 'killed'
+
+/** One subagent or teammate, as the roster keeps it for this session. */
+export type AgentRow = {
+  id: string
+  teammateId?: string
+  /** The agent type it was spawned as (`Explore`, `general-purpose`, ...). */
+  type: string
+  /** The Agent call's short description of the task. */
+  description: string
+  /** The agent whose loop spawned it; absent on a spawn from the main loop. */
+  parentId?: string
+  status: AgentStatus
+  startedAt: number
+  endedAt?: number
+  toolCalls: number
+  toolFails: number
+  /** The agent's final visible text, once it settled. */
+  lastText: string
+}
+
 /** One category of the context window, as the breakdown page lists it. */
 export type BreakdownRow = { label: string; tokens: number; percent: number }
 
@@ -207,6 +229,12 @@ declare module 'claude-code' {
       breakdown: Shaped<BreakdownStore>
       /** The editor files open in, and the choices the plugin's config row offers. */
       editor: Shaped<{ current: string; options: string[]; error?: string }>
+      /** The subagents and teammates this session has seen, in roster order. */
+      agents: Shaped<{ list: AgentRow[] }>
+      /** The language the panel speaks, from `LANG`. */
+      lang: Shaped<'zh' | 'en'>
+      /** The transcript excerpt read for one agent's detail page. */
+      agentMessages: Shaped<{ id: string; lines: string[]; isTruncated?: boolean; error?: string }>
       /** The saved prompts in display order, and why the file could not be read. */
       prompts: Shaped<{ list: Prompt[]; error?: string }>
       sounds: Shaped<SoundSettings>

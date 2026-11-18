@@ -1,10 +1,10 @@
 import type { EngineInterface, PluginOptions, RenderElement, RenderSurface, UiPressArgument } from 'claude-code'
 
-import type { Branch, Meter, ScanState, SoundSettings, SpecChange } from '../types'
+import type { AgentRow, Branch, Meter, ScanState, SoundSettings, SpecChange } from '../types'
 import { statsOf } from './conversation'
 import { closeoutOf } from './closeout'
 import { type DiffGroup, type DiffShown, type FileShown } from './files'
-import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, whenOf, wrapKeep } from './format'
+import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, spanOf, whenOf, wrapKeep } from './format'
 import { failuresOf, groupFailures, isLooping } from './failure'
 import { quotaOf, usdOf, type BreakdownRow, type BreakdownStore } from './meter'
 import {
@@ -14,7 +14,9 @@ import {
   STATS_KEYS,
   TOOLS_ROW,
   callDetailOf,
+  AGENT_TONE,
   closeoutTallyOf,
+  agentItemsOf,
   drillItemsOf,
   filterOf,
   headLineOf,
@@ -29,6 +31,7 @@ import {
 } from './items'
 import type { Group } from './scan'
 import { firstLineOf, type Prompt } from './prompts'
+import { stringsOf, type Lang } from './strings'
 import {
   INK,
   SP,
@@ -250,6 +253,12 @@ export type PaneData = {
   prompts: PromptStore
   /** The editor the plugin is set to use, and the choices its config row offers. */
   editor: { current: string; options: string[]; error?: string }
+  /** The session's subagents and teammates, in roster order. */
+  agents: AgentRow[]
+  /** The language the panel speaks. */
+  lang: Lang
+  /** The transcript read for the open agent's detail. */
+  agentMessages: { id: string; lines: string[]; isTruncated?: boolean; error?: string }
   branches: Branch[]
   diff: DiffShown | null
   file: FileShown | null
@@ -335,6 +344,8 @@ export type PaneActions = {
   openEditor: (next: PaneState) => Promise<void>
   /** Set the plugin's editor option, keeping the page where it is. */
   chooseEditor: (value: string) => Promise<void>
+  /** Read one agent's transcript, then open its detail page. */
+  openAgent: (next: PaneState, id: string) => Promise<void>
   copyPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
   /** Put a prompt in the input box; no box falls back to a copy. */
   launchPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
@@ -369,9 +380,12 @@ export async function drawPane(
   const contentRows = data.scroll.page === page ? data.scroll.contentRows : 0
   const rows = Math.max(3, e.props.scroll.bodyRows)
   const columns = Math.max(24, e.props.bodyColumns)
+  const words = stringsOf(data.lang)
   const isSpec = state.tab === 'spec'
   const now = await $.clock.now()
-  const all = itemsOf(state.tab, stored, state.filter, now, Math.max(8, columns - SP.inline), data.editor.current)
+  const all = state.tab === 'agent'
+    ? agentItemsOf(data.agents, now, words.agent.status)
+    : itemsOf(state.tab, stored, state.filter, now, Math.max(8, columns - SP.inline), data.editor.current)
   const counts = isSpec ? tallyOf(all) : new Map<Group, number>()
   const items = isSpec && state.filter.status !== 'all'
     ? all.filter(one => one.group === state.filter.status)
@@ -403,7 +417,7 @@ export async function drawPane(
       <Text> </Text>
       {TABS.flatMap((one, at) => {
         const isOn = state.tab === one.id
-        const label = columns < 40 ? one.short : one.label
+        const label = columns < 40 ? words.tabs[one.id].short : words.tabs[one.id].label
         const pick = () => actions.navigateTab({ ...state, tab: one.id, index: 0, isDetail: false, fullSection: null, path: [] })
 
         const node = isOn ? (
@@ -904,6 +918,54 @@ export async function drawPane(
             <Text color={INK.muted}>{`${gap}${time}${gap}`}</Text>
             <Text bold={selected}>{summary}</Text>
             {hint === '' ? null : <Text color={INK.muted}>{hint}</Text>}
+          </Text>
+        </Button>
+      </Box>
+    )
+  }
+
+  /** One roster row: status, type, task, parent, how long it ran, its tools. */
+  const agentRow = (item: Item, at: number) => {
+    const selected = at === index
+    const curW = selected ? cellsOf('▸ ') : 2
+    const tagW = tagWidth(columns)
+    const typeW = columns >= 40 ? 12 : 0
+    const parentW = columns >= 56 ? 14 : 0
+    const ageW = columns >= 48 ? 5 : 0
+    const tools = columns < 40 ? String(item.count ?? 0) : `${words.agent.tools} ${item.count ?? 0}`
+    const fixed =
+      SP.inline +
+      curW +
+      SP.group +
+      tagW +
+      SP.group +
+      (typeW === 0 ? 0 : typeW + SP.group) +
+      SP.group +
+      (parentW === 0 ? 0 : parentW + SP.group) +
+      (ageW === 0 ? 0 : ageW + SP.group) +
+      cellsOf(tools)
+    const descW = Math.max(1, columns - fixed)
+    const desc = padCells(endClip(item.summary ?? '', descW), descW)
+    const tagText = columns < 48 ? (item.tag ?? '').slice(0, 1) : (item.tag ?? '')
+
+    return (
+      <Box key={`agent-${item.id}`} flexDirection="row">
+        <Button key={`row-${item.id}`} plain label={item.line} onPress={() => void actions.openAgent({ ...state, index: at, isDetail: true }, item.id)}>
+          <Text wrap="truncate-end">
+            <Text>{' '.repeat(SP.inline)}</Text>
+            <Text color={selected ? INK.accent : undefined}>{selected ? '▸ ' : '  '}</Text>
+            <Text>{' '.repeat(SP.group)}</Text>
+            <Text color={item.tone}>{padCells(endClip(tagText, tagW), tagW)}</Text>
+            <Text>{' '.repeat(SP.group)}</Text>
+            {typeW === 0 ? null : <Text>{padCells(endClip(item.name ?? '', typeW), typeW)}</Text>}
+            {typeW === 0 ? null : <Text>{' '.repeat(SP.group)}</Text>}
+            <Text bold={selected}>{desc}</Text>
+            <Text>{' '.repeat(SP.group)}</Text>
+            {parentW === 0 ? null : <Text color={INK.muted}>{padCells(endClip(item.repo ?? '—', parentW), parentW)}</Text>}
+            {parentW === 0 ? null : <Text>{' '.repeat(SP.group)}</Text>}
+            {ageW === 0 ? null : <Text color={INK.muted}>{padCells(item.age ?? '', ageW)}</Text>}
+            {ageW === 0 ? null : <Text>{' '.repeat(SP.group)}</Text>}
+            <Text color={INK.muted}>{tools}</Text>
           </Text>
         </Button>
       </Box>
@@ -1539,6 +1601,57 @@ export async function drawPane(
     )
   }
 
+  // --------------------------------------------------------------- agent detail
+
+  if (state.tab === 'agent' && state.isDetail && open !== undefined) {
+    const agent = data.agents.find(one => one.id === open.id)
+
+    if (agent !== undefined) {
+      const excerpt = data.agentMessages.id === agent.id ? data.agentMessages : undefined
+      const ended = agent.endedAt ?? now
+      const last = agent.lastText.trim()
+      const fields = [
+        `${words.agent.type}: ${agent.type}`,
+        `${words.agent.parent}: ${agent.parentId ?? '—'}`,
+        `${words.agent.start}: ${whenOf(agent.startedAt)}`,
+        `${words.agent.end}: ${agent.endedAt === undefined ? '—' : whenOf(agent.endedAt)}`,
+        `${words.agent.tools}: ${agent.toolCalls}`,
+        `${words.agent.fails}: ${agent.toolFails}`,
+      ]
+
+      return quietPage(agent.description === '' ? agent.type : agent.description, (
+        <Box flexDirection="column">
+          {fields.map((line, at) => (
+            <Box key={`agent-field-${at}`}>{fieldLine(line, Text, columns)}</Box>
+          ))}
+          <Text color={INK.accent} bold>{`${' '.repeat(SP.inline)}${words.agent.lastText}`}</Text>
+          {noteAt(last === '' ? '（还没有输出）' : `${last.slice(0, 2000)}${last.length > 2000 ? '…' : ''}`)}
+          <Text color={INK.accent} bold>{`${' '.repeat(SP.inline)}${words.agent.excerpt}`}</Text>
+          {excerpt === undefined
+            ? noteAt('（进入详情时读取）')
+            : excerpt.error !== undefined
+              ? noteAt(excerpt.error)
+              : excerpt.lines.length === 0
+                ? noteAt('（没有可读的对话）')
+                : (
+                    <Box flexDirection="column">
+                      {excerpt.lines.map((line, at) => (
+                        <Text key={`agent-line-${at}`}>{`${' '.repeat(SP.inline)}${line}`}</Text>
+                      ))}
+                      {excerpt.isTruncated === true ? noteAt(words.agent.excerptTruncated) : null}
+                    </Box>
+                  )}
+        </Box>
+      ), {
+        tag: words.agent.status[agent.status],
+        tone: AGENT_TONE[agent.status],
+        aside: spanOf(Math.max(0, ended - agent.startedAt)),
+        onBack: () => actions.navigate({ ...state, isDetail: false, index: 0 }),
+        isScrollable: 6 + (excerpt?.lines.length ?? 0) > rows,
+      })
+    }
+  }
+
   // -------------------------------------------------------------- generic detail
 
   if (state.isDetail && open !== undefined) {
@@ -1568,8 +1681,8 @@ export async function drawPane(
   const empty = isSpec && state.filter.status !== 'all' && all.length > 0
     ? `没有「${STATUS_TAG[state.filter.status].full}」状态的变更。`
     : isSpec
-      ? specEmptyOf(data.scanState)
-      : emptyOf(state.tab)
+      ? specEmptyOf(data.scanState, words)
+      : emptyOf(state.tab, words)
 
   const body = items.length === 0
     ? noteAt(empty)
@@ -1577,20 +1690,22 @@ export async function drawPane(
       ? <Box flexDirection="column">{shown.map((item, at) => listRow(item, at))}</Box>
       : state.tab === 'conversation'
         ? <Box flexDirection="column">{shown.map((item, at) => convRow(item, at))}</Box>
-        : <Box flexDirection="column">{shown.map((item, at) => moreRow(item, at))}</Box>
+        : state.tab === 'agent'
+          ? <Box flexDirection="column">{shown.map((item, at) => agentRow(item, at))}</Box>
+          : <Box flexDirection="column">{shown.map((item, at) => moreRow(item, at))}</Box>
 
   const foot = isSpec
     ? `${shown.length}/${items.length} 项 · 点行看详情`
     : state.tab === 'agent'
-      ? '0 项 · 等待子代理'
+      ? items.length === 0 ? words.agent.empty : `${items.length} 项 · 点行看详情`
       : state.tab === 'more'
         ? `${items.length} 项 · 点行进入`
         : `${items.length} 项 · 点行看详情`
   const keys = columns < 40
-    ? '1–4'
+    ? words.tabKeysShort
     : isSpec
-      ? '1–4 页签 · 点状态筛选'
-      : '1–4 页签'
+      ? `${words.tabKeys} · 点状态筛选`
+      : words.tabKeys
 
   const rail = isSpec ? (
     <Box flexDirection="column">
@@ -1598,7 +1713,7 @@ export async function drawPane(
       {closeoutRail()}
       {secondaryFilter()}
     </Box>
-  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'agent' ? plainRail('代理 0 个') : plainRail(`功能 ${items.length} 个`)
+  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'agent' ? plainRail(`${words.agent.rail} ${items.length}`) : plainRail(`功能 ${items.length} 个`)
 
   return listPage(rail, body, foot, keys)
 }
@@ -1901,32 +2016,32 @@ export function clampOf(at: number, length: number): number {
  * not look" are different answers, and only one is the person's cue to check
  * their folder.
  */
-export function specEmptyOf(state: ScanState): string {
+export function specEmptyOf(state: ScanState, words = stringsOf('zh')): string {
   if (state.isStale) {
-    return '（刷新失败，显示上次结果）'
+    return words.scan.stale
   }
 
   if (state.kind === 'skipped') {
-    return `未扫描任何仓库：${state.why}`
+    return words.scan.skipped(state.why)
   }
 
-  return '还没有读到任何 openspec/changes。'
+  return state.kind === 'none' ? words.empty.specNoOpenSpec : words.empty.specNoChanges
 }
 
-export function emptyOf(tab: TabId): string {
+export function emptyOf(tab: TabId, words = stringsOf('zh')): string {
   if (tab === 'spec') {
-    return '还没有读到任何 openspec/changes。'
+    return words.empty.specNoChanges
   }
 
   if (tab === 'conversation') {
-    return '本会话还没有对话。你提交输入、或 AI 发起提问后，这里会出现一轮记录。'
+    return words.empty.conversation
   }
 
   if (tab === 'agent') {
-    return '本会话还没有子代理。'
+    return words.agent.empty
   }
 
-  return '更多里没有可用的入口。'
+  return words.empty.more
 }
 
 /** A clip plays where the store says it may; one that cannot play is one to lose quietly. */

@@ -8,6 +8,7 @@
 
 | 日期 | 变更 | 影响 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | `bench-iteration-4-agents-evidence` | 代理 / 全部 / 文档 | 新增代理花名册（状态/类型/描述/父代理/耗时/工具，详情含对话摘录，只读）；`/panel-export` 导出 Markdown 会话报告（同名追加序号、敏感信息提示）；首屏空态可执行、无 OpenSpec 项目仍可读；本迭代新增文案中英双语，代理数接入 AbovePrompt |
 | 2026-11-18 | `bench-iteration-3-closeout-prompt` | 变更 / 更多 / 界面规范 | 变更详情新增「下一步」：继续 / 就绪时归档 / 打开 tasks·proposal·specs，只预填不提交；变更页新增 `进行/待收尾/异常/陈旧` 汇总；prompt 点行改为预填发射、独立复制按钮、发射计数与 `全局/项目` 作用域；存储升级 v2 并合并两级文件 |
 | 2026-11-18 | `bench-iteration-2-layout-failures` | 全部 / 界面规范 | 页签收敛为**会话 / 变更 / 代理 / 更多**（`1–4`）；MCP 归入会话页下钻，提示音与 prompt 收藏移入「更多」，编辑器可在面板切换；统计轨道新增 `失败 N 次` 与按工具归因的失败视图、「可能在打转」提示；AbovePrompt 改为 `待收尾 · 代理 · CTX`；代理页先给空态 |
 | 2026-11-18 | `bench-iteration-1-meter` | 对话 / 界面规范 | 会话统计轨道追加成本 `$`、5h / 7d 额度与 CTX 同源读数；点 CTX 打开上下文构成页（`summary` 本地估算、可刷新、不压缩）；缺账本写 `$—`；窄屏按 `$ → 7d → 5h → CTX` 收缩 |
@@ -33,7 +34,7 @@
 |---|---|---|
 | 会话（`1`） | [features/conversation](conversation/README.md) | 一轮一行：输入、回答、工具、耗时、token、结束原因；统计轨道含成本、额度、CTX、失败与 MCP 入口；长内容折叠 |
 | 变更（`2`） | [features/openspec](openspec/README.md) | 扫描工作区各仓库的 `openspec/changes/`，平铺成一行一条；状态轨道筛选；详情给「下一步」（预填 / 打开，不自动执行）与收尾汇总 |
-| 代理（`3`） | — | 迭代 4 前为空态「本会话还没有子代理。」 |
+| 代理（`3`） | [features/agent](agent/README.md) | 本会话的子代理/teammates：状态、类型、描述、父代理、耗时、工具数；详情含最后输出与对话摘录；只读 |
 | 更多（`4`） | [features/other](other/README.md) | 入口页三行：prompt 收藏（点行发射、独立复制、全局/项目两级）、提示音、编辑器 |
 | 会话 → MCP | [features/mcp](mcp/README.md) | 从会话页下钻：服务器 → 调用 → 详情，逐层返回 |
 | 更多 → 提示音 | [features/sounds](sounds/README.md) | 总开关 + 决策/完成/异常三类提示音，点行切换、点「试听」当场发声 |
@@ -48,6 +49,15 @@
 | 开机横条（AbovePrompt） | 始终显示 `待收尾 N`、`代理 N`（0 省略）与上下文读数 `CTX n%`（70% / 90% 上色）；窄屏先丢代理、再丢待收尾，CTX 最后丢；全部不可点 | `hooks/register.tsx` 的 `AbovePrompt` |
 | 分支轨道 | 工作区与各仓库的分支、未提交改动数；无卡片，最多 3 行 + 「查看全部」。脏分支可预览 diff、点文件在面板或编辑器里打开。每个页签下都是同一条轨道。[详见 features/branch](branch/README.md) | `hooks/panes.tsx` 的 `branchRail`、`hooks/scan.ts` 的 `discoverOf` |
 | 共用构件 | 规则线、平铺行、状态标签、状态轨道、页头、字段行、页脚、灰阶与间距令牌；测试见 [tests/ui](../tests/ui/README.md) | `hooks/ui.tsx`（规范见 [UI-SPEC](../UI-SPEC.md) 与 `.claude/skills/bench-ui/SKILL.md`） |
+| 会话导出 | `/panel-export` 写 `bench-report-<YYYYMMDD-HHmm>.md` 到项目根：摘要、轮次、OpenSpec、敏感信息提示；同名追加序号，不覆盖 | `hooks/report.ts`、`hooks/register.tsx` |
+| 首屏与双语 | 空态给下一步；无 OpenSpec 也能用；`LANG=en*` 使用英文文案（本迭代新增部分） | `hooks/strings.ts`、`hooks/panes.tsx` |
+
+## 批次未做项（2026-11-18 四迭代）
+
+- 跨会话搜索 / 索引、云同步、上传：不做；面板只读本会话与本机文件。
+- 导出脱敏：不做，只在报告与命令返回里提示「含完整 prompt 与工具结果」。
+- 自动执行：不自动提交 prompt、不自动归档、不终止或重启代理。
+- 占位符替换（`{{change}}` / `{{file}}`）：收藏页没有可靠的当前上下文，明确不做。
 
 ## 怎么写这个索引
 

@@ -6,6 +6,7 @@
 
 | 日期 | 变更 | 新增/修改测试 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | `bench-iteration-4-agents-evidence` | 新增 `agents`(6)、`report`(3)、`strings`(3)；`register`(+10：spawn/事件/对账/详情/导出/首屏/双语/横条代理数) | 197 → **219 条全绿**；`tsc` 0 错误 |
 | 2026-11-18 | `bench-iteration-3-closeout-prompt` | 新增 `closeout`(5，新文件：就绪判定)；改 `prompts`(+1：v1 迁移，scope/launch 排序)、`register`(+2：两级存储/损坏降级、--project)、`interaction`(+4：下一步动作、无输入框、窄屏、收尾计数)、`items`(+1：四项汇总) | 183 → **197 条全绿**；`tsc` 0 错误 |
 | 2026-11-18 | `bench-iteration-2-layout-failures` | 新增 `failure`(5，新文件：归一化、失败聚合、循环检测)；改 `register`(+2：四页签/热键、MCP 逐层)、`stats`(+1：页面迁移)、`interaction`(+2：失败归因、打转提示)、`other`(+1：编辑器)；`items` 改写 MCP 下钻 | 173 → **183 条全绿**；`tsc` 0 错误 |
 | 2026-11-18 | `bench-iteration-1-meter` | 新增 `meter`(5，新文件)；`stats`(+4：成本/额度、缺账本、收缩顺序、宽度)、`register`(+4：启动读数、measure、turn、无账本)、`interaction`(+3：构成页、空态、窄屏) | 155 → **173 条全绿**；`tsc` 0 错误 |
@@ -33,13 +34,16 @@
 | 失败归因 | [tests/conversation](conversation/README.md) | 5 | `failure.test.tsx`(5) |
 | MCP | [tests/mcp](mcp/README.md) | 3 | `register.test.tsx`(其中 2 条)、`items.test.tsx`(1) |
 | 提示音 | [tests/sounds](sounds/README.md) | 1 | `interaction.test.tsx`(1) |
+| 代理 | [tests/agent](agent/README.md) | 6 | `agents.test.tsx`(6) |
+| 会话导出 | [tests/agent](agent/README.md) | 3 | `report.test.tsx`(3) |
+| 首屏与双语 | `register.test.tsx` / `strings.test.tsx` | 5 | 首屏两个页签、英文页签与空态、`langOf` 与文案表 |
 | ~~宠物~~ | [tests/pet](pet/README.md) | 0 | 2026-11-06 起移除 |
-| 启动与横条 | 见下 | 10 | `register.test.tsx`（含 6 条 CTX 读数、2 条横条收缩） |
+| 启动与横条 | 见下 | 14 | `register.test.tsx`（含 6 条 CTX 读数、2 条横条收缩、代理计数、首屏与双语） |
 | 界面构件 | [tests/ui](ui/README.md) | 21 | `ui.test.tsx`(14)、`items.test.tsx`(其中 4 条预算辅助)、`format.test.tsx`(3) |
 | 更多 / prompt 收藏 | [tests/other](other/README.md) | 32 | `other.test.tsx`(21)、`register.test.tsx`(其中 6 条命令/两级存储)、`prompts.test.tsx`(7) |
 | 跨页签返回/滚动 | `interaction.test.tsx` | 2 | 返回浮层位置、滚动高度记录 |
 
-合计 **197 条**，按测试文件：`scan` 14 + `filter` 6 + `grouping` 2 + `interaction` 27 + `register` 22 + `conversation` 13 + `folding` 13 + `branch` 5 + `stats` 19 + `diff` 9 + `items` 7 + `ui` 14 + `format` 3 + `prompts` 7 + `other` 21 + `meter` 5 + `failure` 5 + `closeout` 5。
+合计 **219 条**，按测试文件：`scan` 14 + `filter` 6 + `grouping` 2 + `interaction` 27 + `register` 32 + `conversation` 13 + `folding` 13 + `branch` 5 + `stats` 19 + `diff` 9 + `items` 7 + `ui` 14 + `format` 3 + `prompts` 7 + `other` 21 + `meter` 5 + `failure` 5 + `closeout` 5 + `agents` 6 + `report` 3 + `strings` 3。
 
 「启动与横条」10 条：页签标题与空态、AbovePrompt 的总数与入口，以及 6 条上下文读数（初始、measure、turn 兜底、不可点、横条颜色、横条丢弃顺序）；另有 4 条 `panel-prompt-add` 命令用例计入「其他」。
 
