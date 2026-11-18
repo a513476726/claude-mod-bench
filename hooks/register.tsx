@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderSurface } from 'claude-code'
 
 import type { Branch, Call, ScanState, SoundSettings, SpecChange, Turn } from '../types'
 import {
@@ -16,7 +16,17 @@ import {
 import { editorOf, editFile, openDiff, openFile, readTextOf, rootOf, type DiffShown, type FileShown } from './files'
 import { capMark, capText, cellsOf, ctxOf } from './format'
 import { NO_FILTER } from './items'
-import { drawPane, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState } from './panes'
+import { drawPane, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
+import {
+  addPrompt,
+  bumpPrompt,
+  firstLineOf,
+  parsePrompts,
+  removePrompt,
+  serializePrompts,
+  sortPrompts,
+  type Prompt,
+} from './prompts'
 import { branchesOf, rememberStartCwd, scan, type ScanOutcome } from './scan'
 
 const PANE = 'bench'
@@ -47,8 +57,10 @@ const view = atom(
     path: [],
     filter: NO_FILTER,
     isBranchOpen: false,
+    pendingDelete: null,
+    flash: null,
   } as PaneState,
-  { shape: 'view-7' },
+  { shape: 'view-8' },
 )
 
 const changes = atom({ plugin: 'bench', key: 'changes' } as const, [] as SpecChange[], { shape: 'changes-1' })
@@ -71,6 +83,8 @@ const branches = atom({ plugin: 'bench', key: 'branches' } as const, [] as Branc
  * turn and read once at the start. The pane and the band only read this; nothing
  * here derives it from turn usage, which the engine reports summed. */
 const ctx = atom({ plugin: 'bench', key: 'ctx' } as const, { window: 0 } as ContextFill, { shape: 'ctx-1' })
+/** The saved prompts, in display order, and why the file could not be read. */
+const prompts = atom({ plugin: 'bench', key: 'prompts' } as const, { list: [] } as PromptStore, { shape: 'prompts-1' })
 const diff = atom({ plugin: 'bench', key: 'diff' } as const, null as DiffShown | null, { shape: 'diff-3' })
 const file = atom({ plugin: 'bench', key: 'file' } as const, null as FileShown | null, { shape: 'file-2' })
 /** What the engine last said about the pane's window: how tall the tree was, on
@@ -218,12 +232,119 @@ async function refreshCtx($: EngineInterface): Promise<void> {
   }
 }
 
+const PROMPT_FILE = '.claude/bench-prompts.json'
+
+/** Where the person's prompts live, or null where this host names no home. */
+async function promptFileOf($: EngineInterface): Promise<string | null> {
+  const home = await $.env.get('HOME').catch(() => undefined)
+
+  return home === undefined || home === '' ? null : `${home}/${PROMPT_FILE}`
+}
+
+/** The whole small file, rewritten on every change. */
+async function savePrompts($: EngineInterface, list: Prompt[]): Promise<void> {
+  const path = await promptFileOf($)
+
+  if (path === null) {
+    throw new Error('HOME 未设置')
+  }
+
+  await $.fs.write(path, serializePrompts(list))
+}
+
+/**
+ * The file at the start: a missing one is an empty shelf, a broken one is an
+ * empty shelf that says why — and is left untouched until the next real write.
+ */
+async function loadPrompts($: EngineInterface): Promise<void> {
+  const path = await promptFileOf($)
+
+  if (path === null) {
+    await update($, prompts, () => ({ list: [], error: 'HOME 未设置，收藏无法读写' }))
+
+    return
+  }
+
+  let text: string
+
+  try {
+    text = await $.fs.read(path)
+  } catch (thrown) {
+    const why = String(thrown instanceof Error ? thrown.message : thrown)
+    const isMissing = /ENOENT|no such file/i.test(why)
+
+    await update($, prompts, () => (isMissing ? { list: [] } : { list: [], error: `读取失败：${why}` }))
+
+    return
+  }
+
+  let raw: unknown = null
+
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    raw = null
+  }
+
+  if (raw === null || typeof raw !== 'object' || !Array.isArray((raw as { prompts?: unknown }).prompts)) {
+    await update($, prompts, () => ({ list: [], error: '读取失败：收藏文件格式不对' }))
+
+    return
+  }
+
+  const parsed = parsePrompts(text)
+  const rawPrompts = (raw as { prompts: unknown[] }).prompts
+
+  await update($, prompts, () => ({
+    list: sortPrompts(parsed),
+    ...(parsed.length === rawPrompts.length ? {} : { error: '读取失败：部分条目已损坏' }),
+  }))
+}
+
+
+/** One prompt change at a time: the command and a press must not read the same list. */
+let promptLock: Promise<unknown> = Promise.resolve()
+
+function withPrompts<T>(run: () => Promise<T>): Promise<T> {
+  const next = promptLock.then(run, run)
+
+  promptLock = next.then(() => undefined, () => undefined)
+
+  return next
+}
+
+/** Adds one other-tab command beside the pane's own. */
+async function registerCommands($: EngineInterface): Promise<void> {
+  await $.command.register({ name: 'panel-prompt-add', description: '收藏一条常用 prompt', argumentHint: '<文本>' })
+}
+
+
+/** The footer line a copy leaves, and the token that retires it after two seconds. */
+let flashSeq = 0
+
+async function flash($: EngineInterface, text: string): Promise<void> {
+  const token = ++flashSeq
+
+  await update($, view, prev => ({ ...prev, flash: { text, token } }))
+  $.clock.after(2000, () => {
+    void (async () => {
+      const now = await read($, view).catch(() => null)
+
+      if (now !== null && now.flash?.token === token) {
+        await update($, view, prev => ({ ...prev, flash: null }))
+      }
+    })()
+  })
+}
+
 export const register: Register = (on, options) => {
   // ------------------------------------------------------------- spec progress
 
   on('session.start', async ($, e, next) => {
     rememberStartCwd(String(e.cwd ?? ''))
     await $.command.register({ name: 'panel', description: TITLE })
+    await registerCommands($)
+    await loadPrompts($)
     await refreshCtx($)
 
     // The engine itself says why a pane waits: a floor it fell under, or a surface
@@ -262,6 +383,34 @@ export const register: Register = (on, options) => {
 
     return { text: `${TITLE}已打开。` }
   })
+
+  // The one way a prompt is added: a command, so it works with the pane closed.
+  // The text is a single line, trimmed; the same words are kept once.
+  on('command.run', { command: 'panel-prompt-add' }, async ($, e) =>
+    withPrompts(async () => {
+      const text = String(e.args ?? '').trim()
+
+      if (text === '') {
+        return { text: '用法：/panel-prompt-add <单行文本>' }
+      }
+
+      const current = await read($, prompts)
+      const { list, isAdded } = addPrompt(current.list, text, await $.clock.now())
+
+      if (!isAdded) {
+        return { text: `已存在：${firstLineOf(text)}` }
+      }
+
+      try {
+        await savePrompts($, list)
+      } catch {
+        return { text: '保存失败：无法写入 ~/.claude/bench-prompts.json' }
+      }
+
+      await update($, prompts, () => ({ list }))
+
+      return { text: `已收藏：${firstLineOf(text)}` }
+    }))
 
   // A turn the person did not type (a continuation) still opens a round, so its
   // tools and answer have somewhere to go; a subagent's turn is not the person's.
@@ -495,6 +644,7 @@ export const register: Register = (on, options) => {
         },
         scanState: await read($, scanState),
         ctx: await read($, ctx),
+        prompts: await read($, prompts),
         branches: await read($, branches),
         diff: await read($, diff),
         file: await read($, file),
@@ -503,7 +653,7 @@ export const register: Register = (on, options) => {
       const actions = {
         setView: (next: PaneState) => update($, view, () => next).then(() => undefined),
         navigate: (next: PaneState) => navigateView($, next),
-        navigateTab: (next: PaneState) => navigate($, { view: next, diff: null, file: null }),
+        navigateTab: (next: PaneState) => navigate($, { view: { ...next, pendingDelete: null }, diff: null, file: null }),
         toggleSound: async (key: keyof SoundSettings) => {
           await update($, sounds, prev => ({ ...prev, [key]: !prev[key] }))
         },
@@ -531,6 +681,66 @@ export const register: Register = (on, options) => {
           ),
         editFile: (repo: string, rel: string) =>
           editFile($, repo, rel, editorOf(options), value => navigate($, { file: value })),
+        openPrompts: async (next: PaneState) => {
+          await withPrompts(async () => {
+            const current = await read($, prompts)
+
+            await update($, prompts, prev => ({ ...prev, list: sortPrompts(current.list) }))
+          })
+          await navigate($, { view: { ...next, pendingDelete: null } })
+        },
+        copyPrompt: async (id: string, text: string, surface: RenderSurface) => {
+          const copied = await $.ui.copy({ text, surface })
+
+          if (!copied.isCopied) {
+            await flash($, `复制失败：${copied.reason}`)
+
+            return
+          }
+
+          await withPrompts(async () => {
+            const current = await read($, prompts)
+
+            // The prompt may have been deleted while the clipboard was written.
+            if (!current.list.some(one => one.id === id)) {
+              await flash($, '已删除')
+
+              return
+            }
+
+            const list = bumpPrompt(current.list, id)
+
+            await update($, prompts, prev => ({ ...prev, list, error: undefined }))
+
+            try {
+              await savePrompts($, list)
+            } catch {
+              await flash($, '已复制（保存失败）')
+
+              return
+            }
+
+            await flash($, '已复制')
+          })
+        },
+        askDelete: (id: string) => update($, view, prev => ({ ...prev, pendingDelete: id })).then(() => undefined),
+        cancelDelete: () => update($, view, prev => ({ ...prev, pendingDelete: null })).then(() => undefined),
+        confirmDelete: (id: string) =>
+          withPrompts(async () => {
+            const current = await read($, prompts)
+            const list = removePrompt(current.list, id)
+
+            try {
+              await savePrompts($, list)
+            } catch {
+              await flash($, '删除失败：无法写入文件')
+
+              return
+            }
+
+            await update($, prompts, prev => ({ ...prev, list, error: undefined }))
+            await update($, view, prev => ({ ...prev, pendingDelete: null }))
+          }),
       }
 
       return await drawPane($, e, data, actions, options)

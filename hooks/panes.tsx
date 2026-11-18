@@ -1,4 +1,4 @@
-import type { EngineInterface, PluginOptions, RenderElement } from 'claude-code'
+import type { EngineInterface, PluginOptions, RenderElement, RenderSurface, UiPressArgument } from 'claude-code'
 
 import type { Branch, ScanState, SoundSettings } from '../types'
 import { statsOf } from './conversation'
@@ -21,6 +21,7 @@ import {
   type TabId,
 } from './items'
 import type { Group } from './scan'
+import { firstLineOf, type Prompt } from './prompts'
 import {
   INK,
   SP,
@@ -35,11 +36,38 @@ import {
   type Tone,
 } from './ui'
 
+/** How wide the tab row is at a width: labels, bracketed or plain, gaps and the count. */
+/** The tail a prompt row draws, and the room its words may take: measured, not guessed. */
+export function promptTailOf(
+  columns: number,
+  copies: number,
+  pending: boolean,
+): { countText: string; askText: string; tailCells: number; room: number } {
+  const countText = columns >= 56 ? `×${copies}  ` : ''
+  const askText = pending ? '确认删除？ ' : ''
+  const tailCells = cellsOf(countText) + cellsOf(askText) + cellsOf('删除') + (pending ? 1 + cellsOf('取消') : 0) + 1
+
+  return { countText, askText, tailCells, room: Math.max(1, columns - SP.inline - tailCells) }
+}
+
+export function tabRowCellsOf(columns: number, count: number): number {
+  const labels = TABS.reduce((sum, one) => sum + cellsOf(columns < 40 ? one.short : one.label), 0)
+
+  return (
+    2 +
+    labels +
+    (columns < 56 ? 0 : 4 * (TABS.length - 1)) +
+    (TABS.length - 1) +
+    (columns >= 40 ? cellsOf(`${count} 项`) + 1 : 0)
+  )
+}
+
 export const TABS = [
   { id: 'openspec', label: 'OpenSpec', short: 'Spec', hint: '1' },
   { id: 'conversation', label: '对话', short: '对话', hint: '2' },
   { id: 'mcp', label: 'MCP', short: 'MCP', hint: '3' },
   { id: 'sounds', label: '提示音', short: '音', hint: '4' },
+  { id: 'other', label: '其他', short: '其他', hint: '5' },
 ] as const
 
 /** The OpenSpec row at its widest; narrower pages drop columns from the right. */
@@ -111,11 +139,18 @@ export type PaneState = {
   filter: SpecFilter
   /** Whether the branch rail shows every repo, or only its first few. */
   isBranchOpen?: boolean
+  /** The prompt whose delete waits for a second press; null when none. */
+  pendingDelete?: string | null
+  /** What the footer is saying instead of its own line, and which write put it there. */
+  flash?: { text: string; token: number } | null
 }
 
 /** The live context window: the model's own window, and the input side of the last
  * response once one has come back. */
 export type ContextFill = { tokens?: number; window: number }
+
+/** The saved prompts in display order, and why the file could not be read. */
+export type PromptStore = { list: Prompt[]; error?: string }
 
 /** Everything the pane draws from: the store's values, and the doors it opens. */
 export type PaneData = {
@@ -125,6 +160,8 @@ export type PaneData = {
   stored: Parameters<typeof itemsOf>[1]
   /** The context window's fill, as the engine last measured it. */
   ctx: ContextFill
+  /** The saved prompts, in display order. */
+  prompts: PromptStore
   branches: Branch[]
   diff: DiffShown | null
   file: FileShown | null
@@ -176,6 +213,12 @@ export type PaneActions = {
   showFile: (repo: string, rel: string) => Promise<void>
   openDiff: (repo: string) => Promise<void>
   editFile: (repo: string, rel: string) => Promise<void>
+  /** Enter the prompt shelf, sorted as the person left it. */
+  openPrompts: (next: PaneState) => Promise<void>
+  copyPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
+  askDelete: (id: string) => Promise<void>
+  cancelDelete: () => Promise<void>
+  confirmDelete: (id: string) => Promise<void>
 }
 
 /** What `$.ui.resolve` hands the drawing: the element table of the surface in force. */
@@ -243,7 +286,7 @@ export async function drawPane(
           <Button key={`tab-${one.id}`} label={` ${label} `} plain onPress={pick}>
             <Text color={INK.accent} bold>{label}</Text>
           </Button>
-        ) : columns < 40 ? (
+        ) : columns < 56 ? (
           <Button key={`tab-${one.id}`} label={` ${label} `} plain onPress={pick}>
             <Text dimColor>{label}</Text>
           </Button>
@@ -307,6 +350,72 @@ export async function drawPane(
       {detailChrome(Box, Text, Button, opts.onBack, offset, rows, contentRows, columns, true, opts.isScrollable === true)}
     </Box>
   )
+
+
+  /** One saved prompt: the row copies, the tail deletes after a second press. */
+  const promptRow = (one: Prompt) => {
+    const pending = state.pendingDelete === one.id
+    const { countText, askText, room } = promptTailOf(columns, one.copies, pending)
+    const first = endClip(firstLineOf(one.text), room)
+    const tail = [
+      countText === '' ? null : <Text key="count" color={INK.muted}>{countText}</Text>,
+      askText === '' ? null : <Text key="ask" color="warning">{askText}</Text>,
+      pending ? (
+        <Button key={`prompt-del-ok:${one.id}`} label="删除" plain onPress={() => void actions.confirmDelete(one.id)}>
+          <Text color="error">删除</Text>
+        </Button>
+      ) : (
+        <Button key={`prompt-del:${one.id}`} label="删除" plain onPress={() => void actions.askDelete(one.id)}>
+          <Text dimColor>删除</Text>
+        </Button>
+      ),
+      pending ? <Text key="gap"> </Text> : null,
+      pending ? (
+        <Button key={`prompt-del-cancel:${one.id}`} label="取消" plain onPress={() => void actions.cancelDelete()}>
+          <Text dimColor>取消</Text>
+        </Button>
+      ) : null,
+      <Text key="tail"> </Text>,
+    ]
+
+    return (
+      <Box key={`prompt-${one.id}`} flexDirection="row">
+        <Button
+          key={`prompt:${one.id}`}
+          plain
+          label={one.text}
+          onPress={(press: UiPressArgument) => void actions.copyPrompt(one.id, one.text, press.surface)}
+        >
+          <Text wrap="truncate-end">
+            <Text>{' '.repeat(SP.inline)}</Text>
+            <Text>{first}</Text>
+          </Text>
+        </Button>
+        <Box flexGrow={1} />
+        {tail}
+      </Box>
+    )
+  }
+
+  /** The prompt shelf: a quiet page, one row a copy, a second press to delete. */
+  const promptsPage = () => {
+    const list = data.prompts.list
+    const flash = state.flash?.text
+    const tone = flash === undefined ? INK.muted : flash === '已复制' ? 'success' : flash.startsWith('已复制') ? 'warning' : 'error'
+    const foot = endClip(flash ?? `${list.length} 条 · 点行复制`, Math.max(4, columns - SP.inline))
+
+    return quietPage('prompt 收藏', (
+      <Box flexDirection="column">
+        {data.prompts.error === undefined ? null : noteAt(data.prompts.error)}
+        {list.length === 0 ? noteAt('还没有收藏。用 /panel-prompt-add 添加。') : list.map(one => promptRow(one))}
+        <Text color={INK.frame}>{ruleOf(columns)}</Text>
+        <Text color={tone}>{`${' '.repeat(SP.inline)}${foot}`}</Text>
+      </Box>
+    ), {
+      onBack: () => actions.navigate({ ...state, path: [], pendingDelete: null, index: 0, isDetail: false }),
+      isScrollable: list.length > rows,
+    })
+  }
 
   /** The status rail: one line, all five states, dropped from the right when tight. */
   const statusRail = () => {
@@ -403,6 +512,25 @@ export async function drawPane(
       </Box>
     )
   }
+
+
+  /** The one door the 其他 tab opens to. */
+  const otherRow = (item: Item, at: number) => (
+    <Box key={`other-${item.id}`} flexDirection="row">
+      <Button
+        key={`other:${item.id}`}
+        plain
+        label={item.line}
+        onPress={() => void actions.openPrompts({ ...state, path: ['prompts'], index: 0, isDetail: false })}
+      >
+        <Text wrap="truncate-end">
+          <Text>{' '.repeat(SP.inline)}</Text>
+          <Text color={at === index ? INK.accent : undefined}>{at === index ? '▸ ' : '  '}</Text>
+          <Text bold={at === index}>{item.name ?? item.line}</Text>
+        </Text>
+      </Button>
+    </Box>
+  )
 
   /** The session rail: one summary line, or two when the pane can afford it. */
   const statsRail = () => {
@@ -658,6 +786,12 @@ export async function drawPane(
         ) : null}
       </Box>
     )
+  }
+
+  // ------------------------------------------------------------- prompt shelf
+
+  if (state.tab === 'other' && state.path[0] === 'prompts') {
+    return promptsPage()
   }
 
   // ---------------------------------------------------------------- file page
@@ -967,25 +1101,29 @@ export async function drawPane(
         ? <Box flexDirection="column">{shown.map((item, at) => convRow(item, at))}</Box>
         : state.tab === 'mcp'
           ? <Box flexDirection="column">{shown.map((item, at) => mcpRow(item, at))}</Box>
-          : <Box flexDirection="column">{shown.map((item, at) => soundRow(item, at))}</Box>
+          : state.tab === 'other'
+            ? <Box flexDirection="column">{shown.map((item, at) => otherRow(item, at))}</Box>
+            : <Box flexDirection="column">{shown.map((item, at) => soundRow(item, at))}</Box>
 
   const foot = isSpec
     ? `${shown.length}/${items.length} 项 · 点行看详情`
     : state.tab === 'sounds'
       ? `${items.length} 项 · 点行开关 · 试听`
-      : `${items.length} 项 · 点行看详情`
+      : state.tab === 'other'
+        ? `${items.length} 项 · 点行进入`
+        : `${items.length} 项 · 点行看详情`
   const keys = columns < 40
-    ? '1–4'
+    ? '1–5'
     : isSpec
-      ? '1–4 页签 · 点状态筛选'
-      : '1–4 页签'
+      ? '1–5 页签 · 点状态筛选'
+      : '1–5 页签'
 
   const rail = isSpec ? (
     <Box flexDirection="column">
       {statusRail()}
       {secondaryFilter()}
     </Box>
-  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'mcp' ? plainRail(`服务器 ${items.length} 个`) : plainRail(`开关 ${items.length} 项 · 点行切换 · 试听`)
+  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'mcp' ? plainRail(`服务器 ${items.length} 个`) : state.tab === 'other' ? plainRail(`功能 ${items.length} 个`) : plainRail(`开关 ${items.length} 项 · 点行切换 · 试听`)
 
   return listPage(rail, body, foot, keys)
 }
@@ -1308,6 +1446,10 @@ export function emptyOf(tab: TabId): string {
 
   if (tab === 'mcp') {
     return '本会话还没有调用 MCP 工具。'
+  }
+
+  if (tab === 'other') {
+    return '这里还没有功能。'
   }
 
   return '提示音开关没有读到；按 4 可重新查看。'

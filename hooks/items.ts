@@ -5,7 +5,7 @@ import { groupOf, type Group } from './scan'
 import { STATUS_TAG, type Tone } from './ui'
 
 /** The page and tab the detail is read from. */
-export type TabId = 'openspec' | 'conversation' | 'mcp' | 'sounds'
+export type TabId = 'openspec' | 'conversation' | 'mcp' | 'sounds' | 'other'
 
 
 /** The order the stretches stand in, and what each is called on its heading. */
@@ -216,6 +216,11 @@ export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILT
 
   if (tab === 'mcp') {
     return callItems(stored.calls, width)
+  }
+
+  if (tab === 'other') {
+    // One door for now: the prompt shelf behind it.
+    return [{ id: 'prompt-favorites', line: 'prompt 收藏', name: 'prompt 收藏', detailLines: [] }]
   }
 
   // The sound tab is four switches: each row flips one, and none opens a page.

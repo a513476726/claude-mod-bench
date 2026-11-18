@@ -17,10 +17,14 @@ const PANE = {
 } as const
 
 /** The engine, standing still: no change folder, no MCP call. */
-function quiet(on: On) {
+function quiet(on: On, onOpen?: () => void) {
   mock.clock(on, { now: 1_700_000_000_000 })
   on('command.register', () => ({ value: { command: 'panel' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', () => {
+    onOpen?.()
+
+    return { value: { isPlaced: true } }
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 }
 
@@ -117,6 +121,85 @@ const BAND = {
   component: 'AbovePrompt' as const,
   surface: 'terminal' as const,
 }
+
+/** The saved prompts live under the person's home; the test's home is fixed. */
+function promptHome(on: On, file: string | null) {
+  on('env.get', () => ({ value: '/home/tester' }))
+  on('fs.read', () => (file === null ? { deny: 'ENOENT' } : { value: file }))
+}
+
+test('the add command saves one prompt and refuses an exact duplicate', async ($, on) => {
+  let opens = 0
+
+  quiet(on, () => {
+    opens += 1
+  })
+  promptHome(on, null)
+
+  const written: { path?: string; text?: string } = {}
+
+  on('fs.write', (_, e) => {
+    written.path = e.path
+    written.text = e.text
+
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const openedAtStart = opens
+  const first = await $.command.run({ command: 'panel-prompt-add', args: '  帮我做评审  ' } as never)
+
+  expect(first.text).toBe('已收藏：帮我做评审')
+  expect(written.path).toBe('/home/tester/.claude/bench-prompts.json')
+  expect(written.text).toContain('帮我做评审')
+
+  const again = await $.command.run({ command: 'panel-prompt-add', args: '帮我做评审' } as never)
+
+  expect(again.text).toBe('已存在：帮我做评审')
+  expect(opens).toBe(openedAtStart)
+})
+
+test('the add command explains itself when no text came', async ($, on) => {
+  quiet(on)
+  promptHome(on, null)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const bare = await $.command.run({ command: 'panel-prompt-add', args: '   ' } as never)
+
+  expect(bare.text).toContain('用法')
+})
+
+test('the file is read at the start, so a saved prompt is already known', async ($, on) => {
+  quiet(on)
+  promptHome(on, '{"version":1,"prompts":[{"id":"a","text":"已有","copies":2,"createdAt":1}]}')
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const again = await $.command.run({ command: 'panel-prompt-add', args: '已有' } as never)
+
+  expect(again.text).toBe('已存在：已有')
+})
+
+test('a broken file reads as none, and the next add writes a sound one', async ($, on) => {
+  quiet(on)
+  promptHome(on, '{not json')
+
+  let written = ''
+
+  on('fs.write', (_, e) => {
+    written = e.text
+
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const added = await $.command.run({ command: 'panel-prompt-add', args: '新的' } as never)
+
+  expect(added.text).toBe('已收藏：新的')
+  expect(written).toContain('新的')
+  expect(written).not.toContain('{not json')
+})
 
 async function bandAt($: Engine, columns: number) {
   return await $.ui.mount({

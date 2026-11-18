@@ -152,6 +152,14 @@ export type SoundSettings = {
   error: boolean
 }
 
+/** One saved prompt: its whole text, how often it was copied, and when it was added. */
+export type Prompt = {
+  id: string
+  text: string
+  copies: number
+  createdAt: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'bench': {
@@ -164,6 +172,8 @@ declare module 'claude-code' {
       /** The live context window's fill, as the engine last measured it: the model's
        * window, and the input side of the last response once one has come back. */
       ctx: Shaped<{ tokens?: number; window: number }>
+      /** The saved prompts in display order, and why the file could not be read. */
+      prompts: Shaped<{ list: Prompt[]; error?: string }>
       sounds: Shaped<SoundSettings>
       view: Shaped<{
         tab: string
@@ -176,6 +186,10 @@ declare module 'claude-code' {
         filter: { repo: string; since: 'all' | 'today' | '7d' | '30d'; status: string }
         /** Whether the branch rail shows every repo, or only its first few. */
         isBranchOpen?: boolean
+        /** The prompt whose delete waits for a second press; null when none. */
+        pendingDelete?: string | null
+        /** What the footer says instead of its own line, and which write put it there. */
+        flash?: { text: string; token: number } | null
       }>
       /** Where the pane's window stood, and which page the engine reported it for. */
       scrollInfo: Shaped<{

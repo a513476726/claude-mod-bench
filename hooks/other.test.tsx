@@ -1,0 +1,426 @@
+import { expect, mock, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
+
+import { cellsOf } from './format'
+import { promptTailOf, tabRowCellsOf } from './panes'
+
+const PANE = {
+  plugin: 'bench',
+  component: 'Pane',
+  requestId: 'bench',
+  props: {
+    title: '开发者工作台',
+    isFocused: true,
+    bodyColumns: 100,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows: 30 },
+    view: {},
+  },
+} as const
+
+const PROMPTS = JSON.stringify({
+  version: 1,
+  prompts: [
+    { id: 'b', text: '第二条', copies: 5, createdAt: 200 },
+    { id: 'a', text: '第一条', copies: 1, createdAt: 100 },
+  ],
+})
+
+/** A quiet session with the prompt file already saved at the tester's home. */
+function quiet(on: On, file = PROMPTS, onWrite?: (e: { path: string; text: string }) => 'deny' | void) {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  on('command.register', () => ({ value: { command: 'panel' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: '/nowhere' }))
+  on('env.get', () => ({ value: '/home/tester' }))
+  on('fs.stat', () => ({ deny: 'ENOENT' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', (_, e) => {
+    if (e.path.endsWith('/.git/HEAD')) return { value: 'ref: refs/heads/main\n' }
+    if (e.path.endsWith('bench-prompts.json')) return { value: file }
+
+    return { deny: 'ENOENT' }
+  })
+  on('fs.write', (_, e) => (onWrite?.(e) === 'deny' ? { deny: 'EACCES' } : { value: undefined }))
+
+  return clock
+}
+
+async function mountOf($: Engine, columns = 100) {
+  return $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+}
+
+async function enteredAt($: Engine, columns: number) {
+  const ui = await mountOf($, columns)
+
+  await ui.press({ key: 'tab-other' })
+  await ui.press({ key: 'other:prompt-favorites' })
+
+  return ui
+}
+
+async function entered($: Engine) {
+  return await enteredAt($, 100)
+}
+
+test('the fifth tab is 其他, and 5 brings it up', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+  const tab = (await ui.find({ type: 'Button', key: 'tab-other' })) as { props?: { hotkey?: string } } | undefined
+
+  expect(tab).toBeDefined()
+  expect(tab?.props?.hotkey).toBe('5')
+
+  await ui.unmount()
+})
+
+test('其他 shows one feature door, and it opens a quiet page with a way back', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'tab-other' })
+  expect(await ui.find({ type: 'Button', key: 'other:prompt-favorites' })).toBeDefined()
+
+  await ui.press({ key: 'other:prompt-favorites' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  const tabs = (await ui.findAll({ type: 'Button' })) as { key?: string; props?: { key?: string } }[]
+
+  expect(page).toContain('prompt 收藏')
+  // A quiet page: no tab answers to a key starting with `tab-`.
+  expect(tabs.some(one => String(one.props?.key ?? one.key ?? '').startsWith('tab-'))).toBe(false)
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Button', key: 'other:prompt-favorites' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the saved prompts are read in order, each with its copy count', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? ''))
+
+  const newer = texts.findIndex(one => one.includes('第二条'))
+  const older = texts.findIndex(one => one.includes('第一条'))
+
+  expect(newer).toBeGreaterThan(-1)
+  expect(older).toBeGreaterThan(newer)
+  expect(texts.join('\n')).toContain('×5')
+  expect(texts.join('\n')).toContain('×1')
+
+  await ui.unmount()
+})
+
+test('a row copies the whole text, counts, and says so until it fades', async ($, on) => {
+  const multiline = JSON.stringify({
+    version: 1,
+    prompts: [{ id: 'b', text: '第二条\n第二行', copies: 5, createdAt: 200 }],
+  })
+
+  let written = ''
+  let copied = ''
+
+  const clock = quiet(on, multiline, e => {
+    written = e.text
+  })
+
+  on('ui.copy', (_, e) => {
+    copied = e.text
+
+    return { value: { isCopied: true } }
+  })
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt:b' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(copied).toBe('第二条\n第二行')
+  expect(page).toContain('×6')
+  expect(page).toContain('已复制')
+  expect(written).toContain('"copies": 6')
+
+  await clock.advance(2500)
+
+  const later = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(later).not.toContain('已复制')
+  expect(later).toContain('1 条 · 点行复制')
+
+  await ui.unmount()
+})
+
+test('a failed copy says why and leaves the count alone', async ($, on) => {
+  quiet(on)
+  on('ui.copy', () => ({ value: { isCopied: false, reason: 'no-clipboard' } }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt:b' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('复制失败：no-clipboard')
+  expect(page).toContain('×5')
+
+  await ui.unmount()
+})
+
+test('a copy does not reorder the page; entering it again does', async ($, on) => {
+  quiet(on, JSON.stringify({
+    version: 1,
+    prompts: [
+      { id: 'b', text: '第二条', copies: 2, createdAt: 200 },
+      { id: 'a', text: '第一条', copies: 1, createdAt: 100 },
+    ],
+  }))
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt:a' })
+  await ui.press({ key: 'prompt:a' })
+
+  const samePage = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? ''))
+  const bStillFirst = samePage.findIndex(one => one.includes('第二条'))
+  const aStillSecond = samePage.findIndex(one => one.includes('第一条'))
+
+  expect(bStillFirst).toBeGreaterThan(-1)
+  expect(aStillSecond).toBeGreaterThan(bStillFirst)
+
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'other:prompt-favorites' })
+
+  const reentered = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? ''))
+
+  expect(reentered.findIndex(one => one.includes('第一条'))).toBeLessThan(reentered.findIndex(one => one.includes('第二条')))
+
+  await ui.unmount()
+})
+
+test('a delete asks twice, a cancel keeps the prompt, and a confirm is written', async ($, on) => {
+  let written = ''
+
+  quiet(on, PROMPTS, e => {
+    written = e.text
+  })
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt-del:b' })
+
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('确认删除？')
+
+  await ui.press({ key: 'prompt-del-cancel:b' })
+  expect(await ui.find({ type: 'Button', key: 'prompt:b' })).toBeDefined()
+
+  await ui.press({ key: 'prompt-del:b' })
+  await ui.press({ key: 'prompt-del-ok:b' })
+
+  expect(await ui.find({ type: 'Button', key: 'prompt:b' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'prompt:a' })).toBeDefined()
+  expect(written).not.toContain('第二条')
+  expect(written).toContain('第一条')
+
+  await ui.unmount()
+})
+
+test('the confirmation fits a 24-column row', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await enteredAt($, 24)
+
+  await ui.press({ key: 'prompt-del:b' })
+
+  expect(await ui.find({ type: 'Button', key: 'prompt-del-ok:b' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'prompt-del-cancel:b' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a broken file says so and is not rewritten by opening it', async ($, on) => {
+  let writes = 0
+
+  quiet(on, '{not json', () => {
+    writes += 1
+  })
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('读取失败')
+  expect(writes).toBe(0)
+
+  await ui.unmount()
+})
+
+test('an empty shelf says how to add one', async ($, on) => {
+  quiet(on, '{"version":1,"prompts":[]}')
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('还没有收藏。用 /panel-prompt-add 添加。')
+
+  await ui.unmount()
+})
+
+test('a copy that cannot be saved still counts, and says why', async ($, on) => {
+  quiet(on, PROMPTS, () => 'deny')
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt:b' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('已复制（保存失败）')
+  expect(page).toContain('×6')
+
+  const flashNode = ((await ui.findAll({ type: 'Text' })) as { text?: string; props?: { color?: string } }[]).find(
+    one => String(one.text ?? '').includes('已复制（保存失败）') && one.props?.color !== undefined,
+  )
+
+  expect(flashNode?.props?.color).toBe('warning')
+
+  await ui.unmount()
+})
+
+test('the footer counts five tabs', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('1–5 页签')
+
+  await ui.unmount()
+})
+
+test('a narrow shelf drops the copy counts before the words', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const wide = await enteredAt($, 56)
+  const widePage = (await wide.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(widePage).toContain('×5')
+  await wide.press({ key: 'back' })
+  await wide.unmount()
+
+  const narrow = await enteredAt($, 55)
+  const narrowPage = (await narrow.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(narrowPage).not.toContain('×5')
+  expect(narrowPage).toContain('第二条')
+  expect(await narrow.find({ type: 'Button', key: 'prompt:b' })).toBeDefined()
+  expect(await narrow.find({ type: 'Button', key: 'prompt-del:b' })).toBeDefined()
+  await narrow.unmount()
+})
+
+test('five tabs still fit a 24-column row', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($, 24)
+  const tabs = ((await ui.findAll({ type: 'Button' })) as { key?: string; props?: { key?: string } }[]).filter(one =>
+    String(one.props?.key ?? one.key ?? '').startsWith('tab-'),
+  )
+  expect(tabs).toHaveLength(5)
+
+  // The same rule the renderer uses: labels, chrome, gaps and the count.
+  for (const columns of [24, 40, 48, 56, 80]) {
+    expect(tabRowCellsOf(columns, 1)).toBeLessThanOrEqual(columns)
+  }
+
+  await ui.unmount()
+})
+
+test('a prompt row, confirmed or not, never crosses the width', () => {
+  for (const columns of [24, 40, 56, 100]) {
+    for (const pending of [false, true]) {
+      const { room, tailCells } = promptTailOf(columns, 5, pending)
+
+      expect(2 + room + tailCells).toBeLessThanOrEqual(columns)
+    }
+  }
+})
+
+test('a partly broken file keeps the sound entries and says so', async ($, on) => {
+  quiet(on, '{"version":1,"prompts":[{"id":"a","text":"好的","copies":1,"createdAt":1},{"bad":1}]}')
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('部分条目已损坏')
+  expect(page).toContain('好的')
+
+  await ui.unmount()
+})
+
+test('leaving the shelf drops a half-confirmed delete', async ($, on) => {
+  quiet(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt-del:b' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'other:prompt-favorites' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).not.toContain('确认删除？')
+
+  await ui.unmount()
+})
+
+test('a second copy does not let the first timer clear its line', async ($, on) => {
+  const clock = quiet(on)
+
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt:b' })
+  await clock.advance(1000)
+  await ui.press({ key: 'prompt:b' })
+  await clock.advance(1500)
+
+  const stillThere = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  expect(stillThere).toContain('已复制')
+
+  await clock.advance(600)
+
+  const gone = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  expect(gone).not.toContain('已复制')
+
+  await ui.unmount()
+})

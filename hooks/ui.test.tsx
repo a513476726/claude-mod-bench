@@ -34,7 +34,7 @@ test('the status column is five cells at normal widths and two at narrow ones', 
 
 test('the footer keeps the right hint on the right edge', () => {
   for (const columns of [24, 40, 80]) {
-    const line = footerOf('14/14 项 · 点行看详情', '1–4 页签 · 点状态筛选', columns)
+    const line = footerOf('14/14 项 · 点行看详情', '1–5 页签 · 点状态筛选', columns)
 
     expect(cellsOf(line)).toBe(columns)
     if (columns >= 48) {
@@ -44,7 +44,7 @@ test('the footer keeps the right hint on the right edge', () => {
 
   expect(footerOf('4/4 项', '', 80)).toBe('4/4 项')
   // A left side too long for the page loses the right hint and is cut to the width.
-  const long = footerOf('一'.repeat(80), '1–4', 80)
+  const long = footerOf('一'.repeat(80), '1–5', 80)
   expect(cellsOf(long)).toBe(80)
   expect(long).toContain('…')
 })
