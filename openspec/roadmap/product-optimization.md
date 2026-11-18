@@ -44,11 +44,12 @@
    - 每个行为任务先写失败测试（`superpowers:test-driven-development`）；
    - 失败走 `superpowers:systematic-debugging`，禁止猜测式修复；
    - UI 任务先过 `frontend-design:frontend-design` 设计前置门。
-4. **验证**：`./scripts/acceptance.sh` 输出全绿；文档回归完成（`docs/features`、`docs/tests`、`README.md`、`docs/UI-SPEC.md`）。
+4. **验证**：`./scripts/acceptance.sh --pre` 全绿；`openspec validate <change> --strict` 通过；文档回归完成（`docs/features`、`docs/tests`、`README.md`、`docs/UI-SPEC.md`）。完整验收脚本留到四个迭代全部归档后再跑。
 5. **归档**：`openspec archive <change> --yes`。
 6. **提交**：只提交到当前分支 `auto/bench-product-optimization`，提交信息写明 change 名；**不得**切到 `main`、**不得** `push`、**不得**合并。
 7. **记录**：在 `openspec/roadmap/product-optimization.md` 的「执行记录」追加一行（日期、change、验证结果、提交号）。
-8. 回到第 1 步，直到四个 change 全部归档。
+8. **交接与压缩**：写 `.omc/handoffs/bench-iteration-<n>.md`，至少包含：已归档的 change、最后提交号、下一个 change、当前验证结果、已知风险/未决项。随后执行宿主提供的上下文压缩（`/compact` 或等价能力）；压缩后第一件事是读该交接文件与本 roadmap，确认状态再继续。宿主不支持主动压缩时，停下来请管理员执行 `/compact`，不得带着旧上下文进入下一个 change。
+9. 回到第 1 步，直到四个 change 全部归档。
 
 ### 每次提交前必须报告的实际输出
 
@@ -56,6 +57,7 @@
 - `claude plugin test .`
 - `claude plugin validate .`
 - `openspec validate --all --strict`
+- `./scripts/acceptance.sh --pre`
 
 不得用「应该通过」代替实际输出。
 
