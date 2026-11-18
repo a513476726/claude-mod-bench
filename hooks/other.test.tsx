@@ -38,6 +38,7 @@ function quiet(on: On, file = PROMPTS, onWrite?: (e: { path: string; text: strin
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/nowhere' }))
+  on('session.root', () => ({ value: '/nowhere' }))
   on('env.get', () => ({ value: '/home/tester' }))
   on('fs.stat', () => ({ deny: 'ENOENT' }))
   on('fs.list', () => ({ value: [] }))
@@ -132,19 +133,58 @@ test('the saved prompts are read in order, each with its copy count', async ($, 
   await ui.unmount()
 })
 
-test('a row copies the whole text, counts, and says so until it fades', async ($, on) => {
+test('a row launches the whole text, counts the launch, and says so until it fades', async ($, on) => {
   const multiline = JSON.stringify({
     version: 1,
     prompts: [{ id: 'b', text: '第二条\n第二行', copies: 5, createdAt: 200 }],
   })
 
   let written = ''
-  let copied = ''
+  let filled = ''
 
   const clock = quiet(on, multiline, e => {
     written = e.text
   })
 
+  on('prompt.fill', (_, e) => {
+    filled = e.text
+
+    return { isFilled: true, text: e.text, cursor: e.text.length }
+  })
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await entered($)
+
+  await ui.press({ key: 'prompt:b' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(filled).toBe('第二条\n第二行')
+  expect(page).toContain('×5')
+  expect(page).toContain('发1')
+  expect(page).toContain('已填入输入框')
+  expect(written).toContain('"launches": 1')
+  expect(written).toContain('"copies": 5')
+
+  await clock.advance(2500)
+
+  const later = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(later).not.toContain('已填入')
+  expect(later).toContain('1 条 · 点行发射')
+
+  await ui.unmount()
+})
+
+test('without an input box a row falls back to copying, and the launch count stays', async ($, on) => {
+  let copied = ''
+  let written = ''
+
+  quiet(on, PROMPTS, e => {
+    written = e.text
+  })
+  on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer', text: '', cursor: 0 }))
   on('ui.copy', (_, e) => {
     copied = e.text
 
@@ -159,17 +199,12 @@ test('a row copies the whole text, counts, and says so until it fades', async ($
 
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
-  expect(copied).toBe('第二条\n第二行')
+  expect(copied).toBe('第二条')
   expect(page).toContain('×6')
-  expect(page).toContain('已复制')
+  expect(page).toContain('发0')
+  expect(page).toContain('已复制（输入框不可用）')
   expect(written).toContain('"copies": 6')
-
-  await clock.advance(2500)
-
-  const later = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
-
-  expect(later).not.toContain('已复制')
-  expect(later).toContain('1 条 · 点行复制')
+  expect(written).toContain('"launches": 0')
 
   await ui.unmount()
 })
@@ -182,7 +217,7 @@ test('a failed copy says why and leaves the count alone', async ($, on) => {
 
   const ui = await entered($)
 
-  await ui.press({ key: 'prompt:b' })
+  await ui.press({ key: 'prompt-copy:b' })
 
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
@@ -206,8 +241,8 @@ test('a copy does not reorder the page; entering it again does', async ($, on) =
 
   const ui = await entered($)
 
-  await ui.press({ key: 'prompt:a' })
-  await ui.press({ key: 'prompt:a' })
+  await ui.press({ key: 'prompt-copy:a' })
+  await ui.press({ key: 'prompt-copy:a' })
 
   const samePage = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? ''))
   const bStillFirst = samePage.findIndex(one => one.includes('第二条'))
@@ -321,7 +356,7 @@ test('a copy that cannot be saved still counts, and says why', async ($, on) => 
 
   const ui = await entered($)
 
-  await ui.press({ key: 'prompt:b' })
+  await ui.press({ key: 'prompt-copy:b' })
 
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
@@ -349,7 +384,7 @@ test('the footer counts four tabs', async ($, on) => {
   await ui.unmount()
 })
 
-test('a narrow shelf drops the copy counts before the words', async ($, on) => {
+test('a narrow shelf drops the scope and launch count before the words', async ($, on) => {
   quiet(on)
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
 
@@ -357,15 +392,20 @@ test('a narrow shelf drops the copy counts before the words', async ($, on) => {
   const widePage = (await wide.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
   expect(widePage).toContain('×5')
+  expect(widePage).toContain('全局')
+  expect(widePage).toContain('发0')
   await wide.press({ key: 'back' })
   await wide.unmount()
 
   const narrow = await enteredAt($, 55)
   const narrowPage = (await narrow.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
-  expect(narrowPage).not.toContain('×5')
+  expect(narrowPage).not.toContain('全局')
+  expect(narrowPage).not.toContain('发0')
+  expect(narrowPage).toContain('×5')
   expect(narrowPage).toContain('第二条')
   expect(await narrow.find({ type: 'Button', key: 'prompt:b' })).toBeDefined()
+  expect(await narrow.find({ type: 'Button', key: 'prompt-copy:b' })).toBeDefined()
   expect(await narrow.find({ type: 'Button', key: 'prompt-del:b' })).toBeDefined()
   await narrow.unmount()
 })
@@ -438,9 +478,11 @@ test('four tabs still fit a 24-column row', async ($, on) => {  quiet(on)
 test('a prompt row, confirmed or not, never crosses the width', () => {
   for (const columns of [24, 40, 56, 100]) {
     for (const pending of [false, true]) {
-      const { room, tailCells } = promptTailOf(columns, 5, pending)
+      for (const scope of ['global', 'project'] as const) {
+        const { room, tailCells } = promptTailOf(columns, 5, 3, scope, pending)
 
-      expect(2 + room + tailCells).toBeLessThanOrEqual(columns)
+        expect(2 + room + tailCells).toBeLessThanOrEqual(columns)
+      }
     }
   }
 })
@@ -484,9 +526,9 @@ test('a second copy does not let the first timer clear its line', async ($, on) 
 
   const ui = await entered($)
 
-  await ui.press({ key: 'prompt:b' })
+  await ui.press({ key: 'prompt-copy:b' })
   await clock.advance(1000)
-  await ui.press({ key: 'prompt:b' })
+  await ui.press({ key: 'prompt-copy:b' })
   await clock.advance(1500)
 
   const stillThere = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')

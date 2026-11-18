@@ -31,6 +31,7 @@ function quiet(on: On) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/nowhere' }))
+  on('session.root', () => ({ value: '/nowhere' }))
   on('fs.stat', () => ({ deny: 'ENOENT' }))
   on('fs.list', () => ({ value: [] }))
   on('fs.read', () => ({ deny: 'ENOENT' }))

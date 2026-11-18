@@ -17,8 +17,10 @@ export type SpecChange = {
   total: number
   /** Where the progress last came from, for a change whose tasks.md is absent. */
   hasTasks: boolean
-  /** Files present beside it, to say what there is to read. */
+  /** Files and folders present beside it, to say what there is to read. */
   files: string[]
+  /** Spec files under `specs/`, relative to the change folder; empty when none. */
+  specFiles?: string[]
   /** Last modification among its files, in epoch ms. */
   mtime: number
   /** Read from `changes/archive/` rather than `changes/` itself. */
@@ -175,11 +177,15 @@ export type SoundSettings = {
   error: boolean
 }
 
-/** One saved prompt: its whole text, how often it was copied, and when it was added. */
+/** One saved prompt: its whole text, how often it was copied and launched, and when it was added. */
 export type Prompt = {
   id: string
   text: string
   copies: number
+  /** How many times it was put into the prompt box. */
+  launches: number
+  /** Which file holds it: the person's global shelf, or this project's. */
+  scope: 'global' | 'project'
   createdAt: number
 }
 

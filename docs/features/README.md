@@ -8,6 +8,7 @@
 
 | 日期 | 变更 | 影响 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | `bench-iteration-3-closeout-prompt` | 变更 / 更多 / 界面规范 | 变更详情新增「下一步」：继续 / 就绪时归档 / 打开 tasks·proposal·specs，只预填不提交；变更页新增 `进行/待收尾/异常/陈旧` 汇总；prompt 点行改为预填发射、独立复制按钮、发射计数与 `全局/项目` 作用域；存储升级 v2 并合并两级文件 |
 | 2026-11-18 | `bench-iteration-2-layout-failures` | 全部 / 界面规范 | 页签收敛为**会话 / 变更 / 代理 / 更多**（`1–4`）；MCP 归入会话页下钻，提示音与 prompt 收藏移入「更多」，编辑器可在面板切换；统计轨道新增 `失败 N 次` 与按工具归因的失败视图、「可能在打转」提示；AbovePrompt 改为 `待收尾 · 代理 · CTX`；代理页先给空态 |
 | 2026-11-18 | `bench-iteration-1-meter` | 对话 / 界面规范 | 会话统计轨道追加成本 `$`、5h / 7d 额度与 CTX 同源读数；点 CTX 打开上下文构成页（`summary` 本地估算、可刷新、不压缩）；缺账本写 `$—`；窄屏按 `$ → 7d → 5h → CTX` 收缩 |
 | 2026-11-18 | `prompt-favorites` | 其他 / 界面规范 | 新增第 5 个页签「其他」与 prompt 收藏：`/panel-prompt-add` 添加（去重）、点行复制并计数、按复制次数与新增时间排序、二次确认删除、全局文件存储；页脚改为 `1–5 页签` |
@@ -31,9 +32,9 @@
 | 页签 | 功能文档 | 一句话 |
 |---|---|---|
 | 会话（`1`） | [features/conversation](conversation/README.md) | 一轮一行：输入、回答、工具、耗时、token、结束原因；统计轨道含成本、额度、CTX、失败与 MCP 入口；长内容折叠 |
-| 变更（`2`） | [features/openspec](openspec/README.md) | 扫描工作区各仓库的 `openspec/changes/`，平铺成一行一条，第一列是状态标签；状态轨道筛选，点开看任务与未完成项 |
+| 变更（`2`） | [features/openspec](openspec/README.md) | 扫描工作区各仓库的 `openspec/changes/`，平铺成一行一条；状态轨道筛选；详情给「下一步」（预填 / 打开，不自动执行）与收尾汇总 |
 | 代理（`3`） | — | 迭代 4 前为空态「本会话还没有子代理。」 |
-| 更多（`4`） | [features/other](other/README.md) | 入口页三行：prompt 收藏、提示音、编辑器 |
+| 更多（`4`） | [features/other](other/README.md) | 入口页三行：prompt 收藏（点行发射、独立复制、全局/项目两级）、提示音、编辑器 |
 | 会话 → MCP | [features/mcp](mcp/README.md) | 从会话页下钻：服务器 → 调用 → 详情，逐层返回 |
 | 更多 → 提示音 | [features/sounds](sounds/README.md) | 总开关 + 决策/完成/异常三类提示音，点行切换、点「试听」当场发声 |
 | ~~宠物~~ | [features/pet](pet/README.md) | 2026-11-06 起移除 |

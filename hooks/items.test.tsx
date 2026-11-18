@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Call, SoundSettings, SpecChange } from '../types'
-import { DETAIL_BUDGET, drillItemsOf, itemsOf, takeRows } from './items'
+import { DETAIL_BUDGET, closeoutTallyOf, drillItemsOf, itemsOf, takeRows } from './items'
 
 const sounds: SoundSettings = { isOn: true, decision: true, done: true, error: true }
 
@@ -88,4 +88,35 @@ test('an MCP server lists every call, newest first, under its own name', () => {
   expect(drill.items).toHaveLength(100)
   // Newest first: the last call made leads the list.
   expect(drill.items[0]?.id).toBe('mcp:srv:c99')
+})
+
+test('the closeout tally counts the four buckets, with a week as the stale line', () => {
+  const now = 1_700_000_000_000
+  const week = 7 * 24 * 60 * 60 * 1000
+  const make = (name: string, over: Partial<SpecChange>) => ({
+    name,
+    repo: 'app',
+    done: 1,
+    total: 2,
+    hasTasks: true,
+    files: ['tasks.md', 'proposal.md', 'specs'],
+    mtime: now,
+    isArchived: false,
+    needNo: '',
+    archivedOn: '',
+    authors: [],
+    open: [],
+    ...over,
+  })
+
+  const tally = closeoutTallyOf([
+    make('doing', {}),
+    make('ready', { done: 2, total: 2 }),
+    make('broken', { done: 1, total: 2, isArchived: true }),
+    make('stale', { mtime: now - week - 1 }),
+    make('edge', { mtime: now - week }),
+    make('archived-clean', { done: 2, total: 2, isArchived: true }),
+  ], now)
+
+  expect(tally).toEqual({ doing: 3, ready: 1, broken: 1, stale: 1 })
 })

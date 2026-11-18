@@ -1,7 +1,8 @@
 import type { EngineInterface, PluginOptions, RenderElement, RenderSurface, UiPressArgument } from 'claude-code'
 
-import type { Branch, Meter, ScanState, SoundSettings } from '../types'
+import type { Branch, Meter, ScanState, SoundSettings, SpecChange } from '../types'
 import { statsOf } from './conversation'
+import { closeoutOf } from './closeout'
 import { type DiffGroup, type DiffShown, type FileShown } from './files'
 import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, whenOf, wrapKeep } from './format'
 import { failuresOf, groupFailures, isLooping } from './failure'
@@ -13,7 +14,9 @@ import {
   STATS_KEYS,
   TOOLS_ROW,
   callDetailOf,
+  closeoutTallyOf,
   drillItemsOf,
+  filterOf,
   headLineOf,
   itemsOf,
   soundItemsOf,
@@ -40,18 +43,45 @@ import {
   type Tone,
 } from './ui'
 
-/** How wide the tab row is at a width: labels, bracketed or plain, gaps and the count. */
-/** The tail a prompt row draws, and the room its words may take: measured, not guessed. */
+/**
+ * The tail a prompt row draws, and the room its words may take: measured, not
+ * guessed. Below 56 columns the scope and launch count go; the copy count, the
+ * copy button and the delete button stay.
+ */
 export function promptTailOf(
   columns: number,
   copies: number,
+  launches: number,
+  scope: 'global' | 'project',
   pending: boolean,
-): { countText: string; askText: string; tailCells: number; room: number } {
-  const countText = columns >= 56 ? `×${copies}  ` : ''
-  const askText = pending ? '确认删除？ ' : ''
-  const tailCells = cellsOf(countText) + cellsOf(askText) + cellsOf('删除') + (pending ? 1 + cellsOf('取消') : 0) + 1
+): {
+  scopeText: string
+  countText: string
+  launchText: string
+  askText: string
+  showCopy: boolean
+  tailCells: number
+  room: number
+} {
+  const wide = columns >= 56
+  const scopeText = wide ? `${scope === 'global' ? '全局' : '项目'}  ` : ''
+  // The narrowest rows shorten the question and let the copy door and the count
+  // go while the delete is being confirmed: the row must still fit its page.
+  const countText = pending && columns < 32 ? '' : `×${copies}  `
+  const launchText = wide ? `发${launches}  ` : ''
+  const askText = pending ? (columns < 40 ? '确认？ ' : '确认删除？ ') : ''
+  const showCopy = !(pending && columns < 32)
+  const tailCells =
+    cellsOf(scopeText) +
+    cellsOf(countText) +
+    cellsOf(launchText) +
+    cellsOf(askText) +
+    (showCopy ? cellsOf('复制') : 0) +
+    cellsOf('删除') +
+    (pending ? 1 + cellsOf('取消') : 0) +
+    2
 
-  return { countText, askText, tailCells, room: Math.max(1, columns - SP.inline - tailCells) }
+  return { scopeText, countText, launchText, askText, showCopy, tailCells, room: Math.max(1, columns - SP.inline - tailCells) }
 }
 
 export function tabRowCellsOf(columns: number, count: number): number {
@@ -306,6 +336,10 @@ export type PaneActions = {
   /** Set the plugin's editor option, keeping the page where it is. */
   chooseEditor: (value: string) => Promise<void>
   copyPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
+  /** Put a prompt in the input box; no box falls back to a copy. */
+  launchPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
+  /** Prefill a command (a change's next step); never submit it. */
+  fillPrompt: (text: string) => Promise<void>
   askDelete: (id: string) => Promise<void>
   cancelDelete: () => Promise<void>
   confirmDelete: (id: string) => Promise<void>
@@ -351,7 +385,7 @@ export async function drawPane(
   const branchRows = branches.length === 0
     ? 0
     : branchShown + (branches.length > branchMax && state.isBranchOpen !== true ? 1 : 0)
-  const railRows = isSpec ? 2 : state.tab === 'conversation' ? (rows < 20 ? 1 : 2) : 1
+  const railRows = isSpec ? 3 : state.tab === 'conversation' ? (rows < 20 ? 1 : 2) : 1
   const room = Math.max(1, rows - 5 - railRows - branchRows)
 
   /** One plain line inside a page, padded to its width. */
@@ -437,19 +471,51 @@ export async function drawPane(
       ))}
       <Text color={INK.frame}>{ruleOf(columns)}</Text>
       <Box flexDirection="column" flexGrow={0} flexShrink={0}>{body}</Box>
+      {state.flash == null ? null : (
+        <Text
+          color={
+            state.flash.text.startsWith('已填入')
+              ? 'success'
+              : state.flash.text.startsWith('已复制')
+                ? 'warning'
+                : 'error'
+          }
+        >
+          {`${' '.repeat(SP.inline)}${endClip(state.flash.text, Math.max(4, columns - SP.inline))}`}
+        </Text>
+      )}
       {detailChrome(Box, Text, Button, opts.onBack, offset, rows, contentRows, columns, true, opts.isScrollable === true)}
     </Box>
   )
 
 
-  /** One saved prompt: the row copies, the tail deletes after a second press. */
+  /** One saved prompt: a press launches it, the tail copies or deletes it. */
   const promptRow = (one: Prompt) => {
     const pending = state.pendingDelete === one.id
-    const { countText, askText, room } = promptTailOf(columns, one.copies, pending)
+    const { scopeText, countText, launchText, askText, showCopy, room } = promptTailOf(
+      columns,
+      one.copies,
+      one.launches,
+      one.scope,
+      pending,
+    )
     const first = endClip(firstLineOf(one.text), room)
     const tail = [
-      countText === '' ? null : <Text key="count" color={INK.muted}>{countText}</Text>,
+      scopeText === '' ? null : <Text key="scope" color={INK.muted}>{scopeText}</Text>,
+      <Text key="count" color={INK.muted}>{countText}</Text>,
+      launchText === '' ? null : <Text key="launch" color={INK.muted}>{launchText}</Text>,
       askText === '' ? null : <Text key="ask" color="warning">{askText}</Text>,
+      showCopy ? (
+        <Button
+          key={`prompt-copy:${one.id}`}
+          label="复制"
+          plain
+          onPress={(press: UiPressArgument) => void actions.copyPrompt(one.id, one.text, press.surface)}
+        >
+          <Text dimColor>复制</Text>
+        </Button>
+      ) : null,
+      <Text key="gap"> </Text>,
       pending ? (
         <Button key={`prompt-del-ok:${one.id}`} label="删除" plain onPress={() => void actions.confirmDelete(one.id)}>
           <Text color="error">删除</Text>
@@ -459,7 +525,7 @@ export async function drawPane(
           <Text dimColor>删除</Text>
         </Button>
       ),
-      pending ? <Text key="gap"> </Text> : null,
+      pending ? <Text key="gap-2"> </Text> : null,
       pending ? (
         <Button key={`prompt-del-cancel:${one.id}`} label="取消" plain onPress={() => void actions.cancelDelete()}>
           <Text dimColor>取消</Text>
@@ -474,7 +540,7 @@ export async function drawPane(
           key={`prompt:${one.id}`}
           plain
           label={one.text}
-          onPress={(press: UiPressArgument) => void actions.copyPrompt(one.id, one.text, press.surface)}
+          onPress={(press: UiPressArgument) => void actions.launchPrompt(one.id, one.text, press.surface)}
         >
           <Text wrap="truncate-end">
             <Text>{' '.repeat(SP.inline)}</Text>
@@ -491,8 +557,14 @@ export async function drawPane(
   const promptsPage = () => {
     const list = data.prompts.list
     const flash = state.flash?.text
-    const tone = flash === undefined ? INK.muted : flash === '已复制' ? 'success' : flash.startsWith('已复制') ? 'warning' : 'error'
-    const foot = endClip(flash ?? `${list.length} 条 · 点行复制`, Math.max(4, columns - SP.inline))
+    const tone = flash === undefined
+      ? INK.muted
+      : flash.startsWith('已填入')
+        ? 'success'
+        : flash.startsWith('已复制')
+          ? 'warning'
+          : 'error'
+    const foot = endClip(flash ?? `${list.length} 条 · 点行发射`, Math.max(4, columns - SP.inline))
 
     return quietPage('prompt 收藏', (
       <Box flexDirection="column">
@@ -603,6 +675,41 @@ export async function drawPane(
     )
   }
 
+
+  /** The four closeout counts, kept to one row; zero counts and the right edge go first. */
+  const closeoutRail = () => {
+    const tally = closeoutTallyOf(filterOf(stored.changes, state.filter, now), now)
+    const entries = [
+      { key: 'doing', label: '进行', count: tally.doing },
+      { key: 'ready', label: '待收尾', count: tally.ready },
+      { key: 'broken', label: '异常', count: tally.broken },
+      { key: 'stale', label: '陈旧', count: tally.stale },
+    ].filter(one => one.count > 0)
+    const used = columns - SP.inline
+    let width = 0
+    const nodes: RenderElement[] = []
+
+    for (const one of entries) {
+      const text = `${one.label} ${one.count}`
+      const add = cellsOf(text) + (nodes.length === 0 ? 0 : 3)
+
+      if (width + add > used) {
+        break
+      }
+
+      width += add
+      nodes.push(...(nodes.length === 0 ? [] : [<Text key={`closeout-gap-${one.key}`} color={INK.frame}>{' · '}</Text>]), (
+        <Text key={`closeout-${one.key}`} color={INK.muted}>{text}</Text>
+      ))
+    }
+
+    return nodes.length === 0 ? null : (
+      <Box flexDirection="row">
+        <Text>{' '.repeat(SP.inline)}</Text>
+        {nodes}
+      </Box>
+    )
+  }
 
   /** One door on the more page: the prompt shelf, the sounds, or the editor. */
   const moreRow = (item: Item, at: number) => {
@@ -1363,24 +1470,95 @@ export async function drawPane(
     })
   }
 
+  /**
+   * The change detail's next step: prefill a command or open a file. Nothing here
+   * submits, writes or archives; the person keeps the last word.
+   */
+  const nextActions = (change: SpecChange) => {
+    const closeout = closeoutOf(change)
+    const base = change.isArchived ? `openspec/changes/archive/${change.name}` : `openspec/changes/${change.name}`
+    const specFile = change.specFiles?.[0]
+    const opens = [
+      { key: 'tasks', label: 'tasks.md', rel: change.files.includes('tasks.md') ? `${base}/tasks.md` : undefined },
+      { key: 'proposal', label: 'proposal.md', rel: change.files.includes('proposal.md') ? `${base}/proposal.md` : undefined },
+      { key: 'specs', label: 'specs', rel: specFile === undefined ? undefined : `${base}/${specFile}` },
+    ]
+    const fileNode = (one: (typeof opens)[number]) => (
+      one.rel === undefined ? (
+        <Text key={`open-${one.key}`} color={INK.muted}>{`（无 ${one.label}）`}</Text>
+      ) : (
+        <Button key={`open-${one.key}`} label={one.label} plain onPress={() => void actions.showFile(change.repo, one.rel as string)}>
+          <Text color={INK.accent}>{one.label}</Text>
+        </Button>
+      )
+    )
+
+    return (
+      <Box flexDirection="column">
+        <Text color={INK.frame}>{ruleOf(columns)}</Text>
+        <Text color={INK.accent} bold>{`${' '.repeat(SP.inline)}下一步`}</Text>
+        <Box flexDirection="row">
+          <Text>{' '.repeat(SP.inline)}</Text>
+          <Button key="action-continue" label={`/opsx:apply ${change.name}`} plain onPress={() => void actions.fillPrompt(`/opsx:apply ${change.name}`)}>
+            <Text color={INK.accent}>继续</Text>
+          </Button>
+        </Box>
+        {closeout.isReady ? (
+          <Box flexDirection="row">
+            <Text>{' '.repeat(SP.inline)}</Text>
+            <Button key="action-archive" label={`/opsx:archive ${change.name}`} plain onPress={() => void actions.fillPrompt(`/opsx:archive ${change.name}`)}>
+              <Text color={INK.accent}>归档</Text>
+            </Button>
+          </Box>
+        ) : null}
+        {columns < 56 ? (
+          <Box flexDirection="column">
+            <Text color={INK.muted}>{`${' '.repeat(SP.inline)}打开`}</Text>
+            {opens.map(one => (
+              <Box key={`open-row-${one.key}`} flexDirection="row">
+                <Text>{' '.repeat(SP.inline * 2)}</Text>
+                {fileNode(one)}
+              </Box>
+            ))}
+          </Box>
+        ) : (
+          <Box flexDirection="row">
+            <Text color={INK.muted}>{`${' '.repeat(SP.inline)}打开  `}</Text>
+            {opens.map((one, at) => (
+              <Box key={`open-cell-${one.key}`} flexDirection="row">
+                {at === 0 ? null : <Text> </Text>}
+                {fileNode(one)}
+                {at === opens.length - 1 ? null : <Text> </Text>}
+              </Box>
+            ))}
+          </Box>
+        )}
+        {closeout.missing.length > 0 ? noteAt(`还差 ${closeout.missing.length} 项：${closeout.missing.join('、')}`) : null}
+        {change.isArchived ? noteAt('已归档。') : closeout.isReady ? noteAt('可以归档。') : null}
+      </Box>
+    )
+  }
+
   // -------------------------------------------------------------- generic detail
 
   if (state.isDetail && open !== undefined) {
     const heading = open.name ?? open.detailLines[0] ?? '详情'
     const bodyLines = open.detailLines.slice(1)
+    const change = state.tab === 'spec' ? stored.changes.find(one => `${one.repo}/${one.name}` === open.id) : undefined
 
     return quietPage(heading, (
       <Box flexDirection="column" flexGrow={1}>
         {bodyLines.map((line, at) => (
           <Box key={`detail-${at}`}>{fieldLine(line, Text, columns)}</Box>
         ))}
+        {change === undefined ? null : nextActions(change)}
       </Box>
     ), {
       tag: open.tag,
       tone: open.tone,
       aside: open.done ?? (open.count === undefined ? open.last : `${open.count} 次`),
       onBack: () => actions.navigate({ ...state, isDetail: false }),
-      isScrollable: rowsIn(open.detailLines.join('\n'), Math.max(8, columns - SP.inline)) > rows,
+      isScrollable: rowsIn(open.detailLines.join('\n'), Math.max(8, columns - SP.inline)) + 6 > rows,
     })
   }
 
@@ -1417,6 +1595,7 @@ export async function drawPane(
   const rail = isSpec ? (
     <Box flexDirection="column">
       {statusRail()}
+      {closeoutRail()}
       {secondaryFilter()}
     </Box>
   ) : state.tab === 'conversation' ? statsRail() : state.tab === 'agent' ? plainRail('代理 0 个') : plainRail(`功能 ${items.length} 个`)
@@ -1562,13 +1741,16 @@ function fieldLine(line: string, Text: RenderKit['Text'], room: number): RenderE
   const label = line.slice(0, colon)
   const valueRoom = Math.max(8, room - SP.inline - labelWidth)
   const value = wrapCells(line.slice(colon + 1).trim(), valueRoom)
+  const mark = value.length > 1 ? `  （共 ${value.length} 行）` : ''
 
   return value.map((one, at) => (
     <Text key={`field-${at}`}>
       <Text>{' '.repeat(SP.inline)}</Text>
       <Text color={INK.muted}>{at === 0 ? padCells(label, labelWidth) : ' '.repeat(labelWidth)}</Text>
       <Text>{one}</Text>
-      {value.length > 1 && at === value.length - 1 ? <Text dimColor>{`  （共 ${value.length} 行）`}</Text> : null}
+      {mark !== '' && at === value.length - 1 && SP.inline + labelWidth + cellsOf(one) + cellsOf(mark) <= room
+        ? <Text dimColor>{mark}</Text>
+        : null}
     </Text>
   ))
 }

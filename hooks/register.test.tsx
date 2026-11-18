@@ -26,6 +26,7 @@ function quiet(on: On, onOpen?: () => void) {
     return { value: { isPlaced: true } }
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.root', () => ({ value: '/nowhere' }))
 }
 
 test('the pane draws its titles and says when there is nothing to show', async ($, on) => {
@@ -129,6 +130,78 @@ test('a built-in tool is not kept as an MCP call', async ($, on) => {
   await ui.unmount()
 })
 
+/** Two shelves on a virtual disk: paths to their text, and every write recorded. */
+function shelfWorld(on: On, files: Map<string, string>, writes: string[] = []) {
+  mock.clock(on, { now: 1_700_000_000_000 })
+  on('command.register', () => ({ value: { command: 'panel' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: '/proj' }))
+  on('session.root', () => ({ value: '/proj' }))
+  on('env.get', () => ({ value: '/home/tester' }))
+  on('fs.stat', () => ({ deny: 'ENOENT' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', (_, e) => (files.has(e.path) ? { value: files.get(e.path) as string } : { deny: 'ENOENT' }))
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    writes.push(e.path)
+
+    return { value: undefined }
+  })
+
+  return writes
+}
+
+test('a --project add writes the project shelf, and the same words may live on both', async ($, on) => {
+  const files = new Map<string, string>()
+  const writes = shelfWorld(on, files)
+
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+
+  const globalAdd = await $.command.run({ command: 'panel-prompt-add', args: '共同话术' } as never)
+  const projectAdd = await $.command.run({ command: 'panel-prompt-add', args: '--project 共同话术' } as never)
+  const again = await $.command.run({ command: 'panel-prompt-add', args: '--project 共同话术' } as never)
+
+  expect(globalAdd.text).toBe('已收藏：共同话术')
+  expect(projectAdd.text).toBe('已收藏（项目）：共同话术')
+  expect(again.text).toBe('已存在：共同话术')
+
+  const globalText = files.get('/home/tester/.claude/bench-prompts.json') ?? ''
+  const projectText = files.get('/proj/.bench/prompts.json') ?? ''
+
+  expect(globalText).toContain('"scope": "global"')
+  expect(projectText).toContain('"scope": "project"')
+  expect(writes.filter(one => one.endsWith('bench-prompts.json'))).toHaveLength(1)
+  expect(writes.filter(one => one.endsWith('/.bench/prompts.json'))).toHaveLength(1)
+})
+
+test('a broken project shelf leaves the global shelf readable, and is not overwritten', async ($, on) => {
+  const files = new Map<string, string>([
+    [
+      '/home/tester/.claude/bench-prompts.json',
+      '{"version":2,"prompts":[{"id":"a","text":"全局话术","copies":2,"launches":1,"scope":"global","createdAt":1}]}',
+    ],
+    ['/proj/.bench/prompts.json', '{not json'],
+  ])
+  const writes = shelfWorld(on, files)
+
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-more' })
+  await ui.press({ key: 'more:more-prompts' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('全局话术')
+  expect(page).toContain('全局')
+  expect(page).toContain('项目收藏读取失败')
+  expect(writes).toHaveLength(0)
+
+  await ui.unmount()
+})
+
 test('the band says what is still owed and opens the pane', async ($, on) => {
   quiet(on)
   measuring(on, () => ({ tokens: 620_000, window: 1_000_000 }))
@@ -166,7 +239,12 @@ const BAND = {
 /** The saved prompts live under the person's home; the test's home is fixed. */
 function promptHome(on: On, file: string | null | (() => string | null)) {
   on('env.get', () => ({ value: '/home/tester' }))
-  on('fs.read', () => {
+  on('fs.read', (_, e) => {
+    // The project shelf is a different file; these tests keep it empty.
+    if (e.path.endsWith('/.bench/prompts.json')) {
+      return { deny: 'ENOENT' }
+    }
+
     const text = typeof file === 'function' ? file() : file
 
     return text === null ? { deny: 'ENOENT' } : { value: text }
@@ -379,6 +457,7 @@ function readyBand(on: On) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/ws/app' }))
+  on('session.root', () => ({ value: '/ws/app' }))
   on('env.get', () => ({ value: '/home/tester' }))
   on('fs.stat', (_, e) => {
     const dirs = [

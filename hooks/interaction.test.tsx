@@ -28,8 +28,19 @@ function world(on: On) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/ws/sales-platform' }))
+  on('session.root', () => ({ value: '/ws/sales-platform' }))
   on('fs.stat', (_, e) => {
-    if (['/ws/.git', '/ws/sales-platform', '/ws/sales-platform/.git', '/ws/sales-platform/side', '/ws/sales-platform/side/.git'].includes(e.path)) {
+    const dirs = [
+      '/ws/.git',
+      '/ws/sales-platform',
+      '/ws/sales-platform/.git',
+      '/ws/sales-platform/side',
+      '/ws/sales-platform/side/.git',
+      '/ws/sales-platform/openspec/changes/ready-one/specs',
+      '/ws/sales-platform/openspec/changes/ready-one/specs/spec-k',
+    ]
+
+    if (dirs.includes(e.path)) {
       return { value: { kind: 'dir', size: 0, isLink: false, mtimeMs: 1 } }
     }
 
@@ -72,6 +83,24 @@ function world(on: On) {
 
     if (e.path.endsWith('bare-one') || e.path === '/ws/sales-platform/side') {
       return { value: [] }
+    }
+
+    if (e.path.endsWith('ready-one')) {
+      return {
+        value: [
+          { name: 'tasks.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 },
+          { name: 'proposal.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 },
+          { name: 'specs', kind: 'dir', size: 0, isLink: false, mtimeMs: 1 },
+        ],
+      }
+    }
+
+    if (e.path.endsWith('ready-one/specs')) {
+      return { value: [{ name: 'spec-k', kind: 'dir', size: 0, isLink: false, mtimeMs: 1 }] }
+    }
+
+    if (e.path.endsWith('ready-one/specs/spec-k')) {
+      return { value: [{ name: 'spec.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 }] }
     }
 
     return {
@@ -711,6 +740,106 @@ test('the same command three times is marked as going in circles', async ($, on)
   expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('可能在打转')
 
   await ui.unmount()
+})
+
+test('a change detail preflights its next step and opens its files, never submitting', async ($, on) => {
+  world(on)
+
+  let filled = ''
+
+  on('prompt.fill', (_, e) => {
+    filled = e.text
+
+    return { isFilled: true, text: e.text, cursor: e.text.length }
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+  const pageOf = async () => (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  // The closeout rail counts what the batch still owes.
+  const list = await pageOf()
+  expect(list).toContain('进行 1')
+  expect(list).toContain('待收尾 1')
+  expect(list).toContain('异常 1')
+
+  await ui.press({ key: 'row-sales-platform/ready-one' })
+
+  expect(await ui.find({ type: 'Button', key: 'action-continue' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'action-archive' })).toBeDefined()
+  expect(await pageOf()).toContain('可以归档。')
+
+  await ui.press({ key: 'action-continue' })
+  expect(filled).toBe('/opsx:apply ready-one')
+  expect(await pageOf()).toContain('已填入输入框')
+
+  await ui.press({ key: 'action-archive' })
+  expect(filled).toBe('/opsx:archive ready-one')
+
+  await ui.press({ key: 'open-tasks' })
+  expect(String((await ui.find({ type: 'Code' }))?.props.source ?? '')).toContain('- [x] a')
+
+  // The file page's back returns to the list, so the detail is opened again for
+  // the other door.
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'row-sales-platform/ready-one' })
+  await ui.press({ key: 'open-specs' })
+  expect(await ui.find({ type: 'Code' })).toBeDefined()
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Button', key: 'rail-doing' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a change whose input box is unavailable says so, and never submits', async ($, on) => {
+  world(on)
+  on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer', text: '', cursor: 0 }))
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'row-sales-platform/ready-one' })
+  await ui.press({ key: 'action-continue' })
+
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('输入框不可用')
+
+  await ui.unmount()
+})
+
+test('a change that is not ready says what it still owes, and offers no archive', async ($, on) => {
+  world(on)
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'row-sales-platform/doing-one' })
+
+  expect(await ui.find({ type: 'Button', key: 'action-continue' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'action-archive' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('还差 2 项')
+
+  await ui.unmount()
+})
+
+test('the next-step actions fit 80, 40 and 24 columns without overflowing', async ($, on) => {
+  world(on)
+  on('prompt.fill', (_, e) => ({ isFilled: true, text: e.text, cursor: e.text.length }))
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  for (const columns of [80, 40, 24]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+
+    await ui.press({ key: 'row-sales-platform/ready-one' })
+
+    for (const one of (await ui.findAll({ type: 'Text' })) as { text?: string }[]) {
+      expect(cellsOf(String(one.text ?? ''))).toBeLessThanOrEqual(columns)
+    }
+
+    await ui.press({ key: 'back' })
+    await ui.unmount()
+  }
 })
 /** A square of the engine's context grid, as the breakdown page reads it. */
 function square(categoryName: string, tokens: number, percentage: number) {

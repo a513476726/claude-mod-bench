@@ -41,22 +41,32 @@ claude plugin test . 2>&1 | grep -A30 other      # 页签与功能页
 | 更多 shows three doors, and the prompt one opens a quiet page with a way back | 入口页三行（prompt 收藏 / 提示音 / 编辑器）；点入是安静页（无页签）；返回可用 |
 | the editor row shows the current choice, and a choice is written to config | 编辑器行显示当前值；选 `vscode` 后写 `bench.editor=vscode`，返回后入口行同步 |
 | the saved prompts are read in order, each with its copy count | 行按次数排序，显示 `×N` |
-| a row copies the whole text, counts, and says so until it fades | 复制的是全文（含换行），次数 +1、写文件、页脚「已复制」；2.5 秒后提示消失 |
+| a row launches the whole text, counts the launch, and says so until it fades | 点行把全文交给 `prompt.fill`（含换行），发射次数 +1、写文件、页脚「已填入输入框」；2.5 秒后提示消失 |
+| without an input box a row falls back to copying, and the launch count stays | `isFilled: false` → 复制全文，复制次数 +1、发射次数不变，页脚「已复制（输入框不可用）」 |
 | a failed copy says why and leaves the count alone | 复制失败显示原因，次数不变 |
 | a copy does not reorder the page; entering it again does | 复制后不跳；重新进入（重读文件）后按新次数重排 |
-| a delete asks twice, a cancel keeps the prompt, and a confirm is written | 「删除 → 取消」保留；「删除 → 删除」移除并写回文件 |
+| a delete asks twice, a cancel keeps the prompt, and a confirm is written | 「删除 → 取消」保留；「删除 → 删除」移除并只写回所属作用域 |
 | the confirmation fits a 24-column row | 24 列下确认态仍画出「删除 / 取消」 |
 | a broken file says so and is not rewritten by opening it | 损坏文件显示「读取失败」，打开页面不写文件 |
 | an empty shelf says how to add one | 空收藏显示 `/panel-prompt-add` 提示 |
 | a shelf entered after a /clear lists what the file holds | `/clear` 后没有 `session.start`：进入页面仍从文件读出全部收藏 |
 | a copy that cannot be saved still counts, and says why | 写文件失败时次数仍 +1，页脚显示「已复制（保存失败）」 |
 | the footer counts four tabs | 页脚显示 `1–4 页签` |
-| a narrow shelf drops the copy counts before the words | 56 列保留 `×N`，55 列丢弃但保留文本与删除 |
+| a narrow shelf drops the scope and launch count before the words | 56 列保留 `全局` / `发0` / `×5`；55 列丢掉作用域与发射数，保留 `×5`、文本与两个按钮 |
 | four tabs still fit a 24-column row | `tabRowCellsOf` 在 24/40/48/56/80 列下都不超过列宽；24 列画出 4 个页签 |
-| a prompt row, confirmed or not, never crosses the width | `promptTailOf` 在 24/40/56/100 列、普通与确认态下，缩进+文本+尾部都不超过列宽 |
+| a prompt row, confirmed or not, never crosses the width | `promptTailOf` 在 24/40/56/100 列、全局/项目、普通与确认态下都不超过列宽 |
 | a partly broken file keeps the sound entries and says so | 部分条目损坏时保留好条目并显示「部分条目已损坏」 |
 | leaving the shelf drops a half-confirmed delete | 返回后重新进入，不残留「确认删除？」 |
 | a second copy does not let the first timer clear its line | 连续复制时，第一次的定时器不会提前清掉第二次的提示 |
+
+### 两级存储（`hooks/register.test.tsx`、`hooks/prompts.test.tsx`）
+
+| 测试 | 验的是什么 |
+|---|---|
+| a --project add writes the project shelf, and the same words may live on both | `--project` 写 `<root>/.bench/prompts.json`；同一句话可同时存在于全局与项目；同作用域重复回「已存在」 |
+| a broken project shelf leaves the global shelf readable, and is not overwritten | 项目文件损坏时全局条目仍可见，页面提示哪一级失败，不写回损坏文件 |
+| a version 1 file is read as the global shelf with no launches | v1 → `launches: 0`、`scope: "global"` |
+| prompts sort by copies plus launches, and the newer one wins a tie | 使用次数 = 复制 + 发射 |
 
 ## 未自动化的部分
 

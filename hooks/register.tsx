@@ -20,6 +20,7 @@ import { breakdownOf, NO_BREAKDOWN, type BreakdownStore } from './meter'
 import { drawPane, migrateView, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
 import {
   addPrompt,
+  bumpLaunch,
   bumpPrompt,
   firstLineOf,
   parsePrompts,
@@ -332,39 +333,33 @@ async function refreshEditor($: EngineInterface): Promise<void> {
   }))
 }
 
-const PROMPT_FILE = '.claude/bench-prompts.json'
+const GLOBAL_FILE = '.claude/bench-prompts.json'
+const PROJECT_FILE = '.bench/prompts.json'
 
-/** Where the person's prompts live, or null where this host names no home. */
-async function promptFileOf($: EngineInterface): Promise<string | null> {
-  const home = await $.env.get('HOME').catch(() => undefined)
+type PromptScope = 'global' | 'project'
 
-  return home === undefined || home === '' ? null : `${home}/${PROMPT_FILE}`
-}
+/** Where one shelf lives, or null where the host names no such place. */
+async function promptFileOf($: EngineInterface, scope: PromptScope): Promise<string | null> {
+  if (scope === 'project') {
+    const root = await $.session.root().catch(() => undefined)
 
-/** The whole small file, rewritten on every change. */
-async function savePrompts($: EngineInterface, list: Prompt[]): Promise<void> {
-  const path = await promptFileOf($)
-
-  if (path === null) {
-    throw new Error('HOME 未设置')
+    return root === undefined || root === '' ? null : `${root}/${PROJECT_FILE}`
   }
 
-  await $.fs.write(path, serializePrompts(list))
+  const home = await $.env.get('HOME').catch(() => undefined)
+
+  return home === undefined || home === '' ? null : `${home}/${GLOBAL_FILE}`
 }
 
-/**
- * The file as the shelf: a missing one is an empty shelf, a broken one is an
- * empty shelf that says why — and is left untouched until the next real write.
- *
- * The file is asked every time, never the session's copy of it alone: a `/clear`
- * ends the session and starts another with no `session.start` after it, so the
- * state the first session read is gone while the file still holds every prompt.
- */
-async function readShelf($: EngineInterface): Promise<PromptStore> {
-  const path = await promptFileOf($)
+/** One shelf's own file, read fresh: a copy or delete must land on what is there now. */
+type ShelfPart = { list: Prompt[]; error?: string }
+
+async function readPart($: EngineInterface, scope: PromptScope): Promise<ShelfPart> {
+  const label = scope === 'global' ? '全局' : '项目'
+  const path = await promptFileOf($, scope)
 
   if (path === null) {
-    return { list: [], error: 'HOME 未设置，收藏无法读写' }
+    return { list: [], error: scope === 'global' ? 'HOME 未设置，全局收藏无法读写' : '会话目录未知，项目收藏无法读写' }
   }
 
   let text: string
@@ -373,9 +368,8 @@ async function readShelf($: EngineInterface): Promise<PromptStore> {
     text = await $.fs.read(path)
   } catch (thrown) {
     const why = String(thrown instanceof Error ? thrown.message : thrown)
-    const isMissing = /ENOENT|no such file/i.test(why)
 
-    return isMissing ? { list: [] } : { list: [], error: `读取失败：${why}` }
+    return /ENOENT|no such file/i.test(why) ? { list: [] } : { list: [], error: `${label}收藏读取失败：${why}` }
   }
 
   let raw: unknown = null
@@ -387,15 +381,35 @@ async function readShelf($: EngineInterface): Promise<PromptStore> {
   }
 
   if (raw === null || typeof raw !== 'object' || !Array.isArray((raw as { prompts?: unknown }).prompts)) {
-    return { list: [], error: '读取失败：收藏文件格式不对' }
+    return { list: [], error: `${label}收藏读取失败：文件格式不对` }
   }
 
   const parsed = parsePrompts(text)
   const rawPrompts = (raw as { prompts: unknown[] }).prompts
+  // The file's own shelf wins over anything an entry says about its scope.
+  const list = parsed.map(one => ({ ...one, scope }))
 
   return parsed.length === rawPrompts.length
-    ? { list: sortPrompts(parsed) }
-    : { list: sortPrompts(parsed), error: '读取失败：部分条目已损坏' }
+    ? { list }
+    : { list, error: `${label}收藏读取失败：部分条目已损坏` }
+}
+
+/**
+ * Both shelves as one list: the global file and the project's, merged and sorted.
+ * One unread shelf never hides the other; the page says which file failed.
+ *
+ * The files are asked every time, never the session's copy alone: a `/clear`
+ * ends the session and starts another with no `session.start` after it, so the
+ * state the first session read is gone while the files still hold every prompt.
+ */
+async function readShelf($: EngineInterface): Promise<PromptStore> {
+  const [global, project] = await Promise.all([readPart($, 'global'), readPart($, 'project')])
+  const errors = [global.error, project.error].filter((one): one is string => one !== undefined)
+
+  return {
+    list: sortPrompts([...global.list, ...project.list]),
+    ...(errors.length === 0 ? {} : { error: errors.join('；') }),
+  }
 }
 
 /** The shelf at the session's start: what the pane draws before anyone asks for it. */
@@ -406,16 +420,30 @@ async function loadPrompts($: EngineInterface): Promise<void> {
 }
 
 /**
- * The shelf a write starts from: the file where it reads, else the shelf this
- * session already drew, so a copy or a delete still lands while the file cannot
- * be read — and the next real write replaces the file it could not read.
+ * The list a write starts from on one shelf: the file where it reads, else what
+ * this session already drew for that scope, so a copy or delete still lands while
+ * the file cannot be read — and the next real write replaces what it could not read.
  */
-async function writeShelf($: EngineInterface): Promise<PromptStore> {
-  const shelf = await readShelf($)
+async function scopeListOf($: EngineInterface, scope: PromptScope): Promise<Prompt[]> {
+  const part = await readPart($, scope)
 
-  return shelf.error === undefined ? shelf : await read($, prompts)
+  if (part.error === undefined) {
+    return part.list
+  }
+
+  return (await read($, prompts)).list.filter(one => one.scope === scope)
 }
 
+/** The whole small file, rewritten on every change; only its own shelf's entries. */
+async function savePrompts($: EngineInterface, list: Prompt[], scope: PromptScope): Promise<void> {
+  const path = await promptFileOf($, scope)
+
+  if (path === null) {
+    throw new Error(scope === 'global' ? 'HOME 未设置' : '会话目录未知')
+  }
+
+  await $.fs.write(path, serializePrompts(list))
+}
 
 /** One prompt change at a time: the command and a press must not read the same list. */
 let promptLock: Promise<unknown> = Promise.resolve()
@@ -511,31 +539,34 @@ export const register: Register = (on, options) => {
   })
 
   // The one way a prompt is added: a command, so it works with the pane closed.
-  // The text is a single line, trimmed; the same words are kept once.
+  // The text is a single line, trimmed; `--project` puts it on the project shelf.
   on('command.run', { command: 'panel-prompt-add' }, async ($, e) =>
     withPrompts(async () => {
-      const text = String(e.args ?? '').trim()
+      const raw = String(e.args ?? '').trim()
+      const isProject = /^--project(?:\s+|$)/.test(raw)
+      const text = raw.replace(/^--project(?:\s+|$)/, '').trim()
 
       if (text === '') {
-        return { text: '用法：/panel-prompt-add <单行文本>' }
+        return { text: '用法：/panel-prompt-add [--project] <单行文本>' }
       }
 
-      const current = await writeShelf($)
-      const { list, isAdded } = addPrompt(current.list, text, await $.clock.now())
+      const scope: PromptScope = isProject ? 'project' : 'global'
+      const current = await scopeListOf($, scope)
+      const { list, isAdded } = addPrompt(current, text, await $.clock.now(), scope)
 
       if (!isAdded) {
         return { text: `已存在：${firstLineOf(text)}` }
       }
 
       try {
-        await savePrompts($, list)
+        await savePrompts($, list, scope)
       } catch {
-        return { text: '保存失败：无法写入 ~/.claude/bench-prompts.json' }
+        return { text: `保存失败：无法写入${scope === 'project' ? '项目 .bench/prompts.json' : ' ~/.claude/bench-prompts.json'}` }
       }
 
-      await update($, prompts, () => ({ list }))
+      await loadPrompts($)
 
-      return { text: `已收藏：${firstLineOf(text)}` }
+      return { text: `已收藏${scope === 'project' ? '（项目）' : ''}：${firstLineOf(text)}` }
     }))
 
   // A turn the person did not type (a continuation) still opens a round, so its
@@ -848,6 +879,12 @@ export const register: Register = (on, options) => {
           }
         },
         refreshBreakdown: () => loadBreakdown($),
+        /** The closeout's one act: prefill the box, never submit it. */
+        fillPrompt: async (text: string) => {
+          const filled = await $.prompt.fill({ text, mode: 'replace' })
+
+          await flash($, filled.isFilled ? '已填入输入框' : '输入框不可用')
+        },
         copyPrompt: async (id: string, text: string, surface: RenderSurface) => {
           const copied = await $.ui.copy({ text, surface })
 
@@ -858,21 +895,32 @@ export const register: Register = (on, options) => {
           }
 
           await withPrompts(async () => {
-            const current = await writeShelf($)
+            const target = (await read($, prompts)).list.find(one => one.id === id)
 
-            // The prompt may have been deleted while the clipboard was written.
-            if (!current.list.some(one => one.id === id)) {
+            if (target === undefined) {
               await flash($, '已删除')
 
               return
             }
 
-            const list = bumpPrompt(current.list, id)
+            const current = await scopeListOf($, target.scope)
 
-            await update($, prompts, prev => ({ ...prev, list, error: undefined }))
+            if (!current.some(one => one.id === id)) {
+              await flash($, '已删除')
+
+              return
+            }
+
+            const list = bumpPrompt(current, id)
+
+            await update($, prompts, prev => ({
+              ...prev,
+              list: prev.list.map(one => (one.id === id ? { ...one, copies: one.copies + 1 } : one)),
+              error: undefined,
+            }))
 
             try {
-              await savePrompts($, list)
+              await savePrompts($, list, target.scope)
             } catch {
               await flash($, '已复制（保存失败）')
 
@@ -882,22 +930,107 @@ export const register: Register = (on, options) => {
             await flash($, '已复制')
           })
         },
+        /**
+         * A row's main act: put the whole text in the input box, never submit it.
+         * No box (headless, a dialog) falls back to the clipboard and says why.
+         */
+        launchPrompt: async (id: string, text: string, surface: RenderSurface) => {
+          const filled = await $.prompt.fill({ text, mode: 'replace' })
+
+          if (!filled.isFilled) {
+            const copied = await $.ui.copy({ text, surface })
+
+            if (!copied.isCopied) {
+              await flash($, `输入框不可用，复制失败：${copied.reason}`)
+
+              return
+            }
+
+            await withPrompts(async () => {
+              const target = (await read($, prompts)).list.find(one => one.id === id)
+
+              if (target === undefined) {
+                await flash($, '已删除')
+
+                return
+              }
+
+              const current = await scopeListOf($, target.scope)
+              const list = bumpPrompt(current, id)
+
+              await update($, prompts, prev => ({
+                ...prev,
+                list: prev.list.map(one => (one.id === id ? { ...one, copies: one.copies + 1 } : one)),
+                error: undefined,
+              }))
+
+              try {
+                await savePrompts($, list, target.scope)
+              } catch {
+                await flash($, '已复制（输入框不可用，保存失败）')
+
+                return
+              }
+
+              await flash($, '已复制（输入框不可用）')
+            })
+
+            return
+          }
+
+          await withPrompts(async () => {
+            const target = (await read($, prompts)).list.find(one => one.id === id)
+
+            if (target === undefined) {
+              await flash($, '已删除')
+
+              return
+            }
+
+            const current = await scopeListOf($, target.scope)
+            const list = bumpLaunch(current, id)
+
+            await update($, prompts, prev => ({
+              ...prev,
+              list: prev.list.map(one => (one.id === id ? { ...one, launches: one.launches + 1 } : one)),
+              error: undefined,
+            }))
+
+            try {
+              await savePrompts($, list, target.scope)
+            } catch {
+              await flash($, '已填入（保存失败）')
+
+              return
+            }
+
+            await flash($, '已填入输入框')
+          })
+        },
         askDelete: (id: string) => update($, view, prev => ({ ...prev, pendingDelete: id })).then(() => undefined),
         cancelDelete: () => update($, view, prev => ({ ...prev, pendingDelete: null })).then(() => undefined),
         confirmDelete: (id: string) =>
           withPrompts(async () => {
-            const current = await writeShelf($)
-            const list = removePrompt(current.list, id)
+            const target = (await read($, prompts)).list.find(one => one.id === id)
+
+            if (target === undefined) {
+              await update($, view, prev => ({ ...prev, pendingDelete: null }))
+
+              return
+            }
+
+            const current = await scopeListOf($, target.scope)
+            const list = removePrompt(current, id)
 
             try {
-              await savePrompts($, list)
+              await savePrompts($, list, target.scope)
             } catch {
               await flash($, '删除失败：无法写入文件')
 
               return
             }
 
-            await update($, prompts, prev => ({ ...prev, list, error: undefined }))
+            await update($, prompts, prev => ({ ...prev, list: prev.list.filter(one => one.id !== id), error: undefined }))
             await update($, view, prev => ({ ...prev, pendingDelete: null }))
           }),
       }

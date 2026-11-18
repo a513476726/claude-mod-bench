@@ -15,6 +15,9 @@ node_modules/
 # OMC runtime state
 .omc/
 
+# Project-scoped prompt shelf (per project, not shared)
+.bench/
+
 # Local run artifacts
 *.log
 .dev-panel-dock.txt

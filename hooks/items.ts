@@ -208,6 +208,48 @@ export function filterOf(changes: SpecChange[], filter: SpecFilter, now: number)
   return changes.filter(one => (repo === 'all' || one.repo === repo) && one.mtime >= floor)
 }
 
+/** What a batch of changes still owes, in four settle-it buckets. */
+export type CloseoutTally = { doing: number; ready: number; broken: number; stale: number }
+
+/**
+ * The four closeout counts, over the changes the repo/time filter keeps. A stale
+ * change is an unfinished one nobody has touched for a week; it is also counted
+ * as doing, because the two questions are different.
+ */
+export function closeoutTallyOf(changes: SpecChange[], now: number): CloseoutTally {
+  const staleFloor = now - 7 * DAY_MS
+  let doing = 0
+  let ready = 0
+  let broken = 0
+  let stale = 0
+
+  for (const one of changes) {
+    const unfinished = one.hasTasks && one.done < one.total
+
+    if (one.isArchived) {
+      if (unfinished) {
+        broken += 1
+      }
+
+      continue
+    }
+
+    if (one.hasTasks && one.total > 0 && one.done >= one.total) {
+      ready += 1
+    }
+
+    if (unfinished) {
+      doing += 1
+
+      if (one.mtime < staleFloor) {
+        stale += 1
+      }
+    }
+  }
+
+  return { doing, ready, broken, stale }
+}
+
 /** The rows each tab stands for, the newest first where time orders them; the
  * OpenSpec page is read through the person's filter. */
 export function itemsOf(
