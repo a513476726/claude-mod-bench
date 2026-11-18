@@ -8,6 +8,7 @@
 
 | 日期 | 变更 | 影响 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | `bench-iteration-1-meter` | 对话 / 界面规范 | 会话统计轨道追加成本 `$`、5h / 7d 额度与 CTX 同源读数；点 CTX 打开上下文构成页（`summary` 本地估算、可刷新、不压缩）；缺账本写 `$—`；窄屏按 `$ → 7d → 5h → CTX` 收缩 |
 | 2026-11-18 | `prompt-favorites` | 其他 / 界面规范 | 新增第 5 个页签「其他」与 prompt 收藏：`/panel-prompt-add` 添加（去重）、点行复制并计数、按复制次数与新增时间排序、二次确认删除、全局文件存储；页脚改为 `1–5 页签` |
 | 2026-11-18 | `token-km-ctx-percent` | 对话 / 横条 / 界面规范 | token 数字改为 K/M（向下取整）；新增上下文读数 `CTX n%`（引擎 `session.usage().context`，真实窗口，70% warning / 90% error），出现在会话统计轨道行尾与 AbovePrompt 横条；按模型下钻只改单位不带百分比；单轮详情保留精确 token；窄屏先丢 CTX，横条先丢 MCP/对话 |
 | 2026-11-17 | `direction-d-tagged-panel` | 全部 / 界面规范 | 界面重置为**方向 D（状态优先 / 平铺）**：状态成为每行第一列，颜色只落在状态标签与状态轨道；页面改为「页签 → 规则线 → 状态/统计轨道 → 平铺行 → 页脚 → 分支轨道」，**移除卡片、emoji、五色分段标题与 `z` 分组折叠**；详情改为安静页（无页签/轨道，标题完整折行、右上返回）；分支从卡片改为无框轨道（最多 3 行 + 查看全部）；OpenSpec 新增状态轨道与紧凑的仓库/时间次要筛选 |
@@ -29,7 +30,7 @@
 | 页签 | 功能文档 | 一句话 |
 |---|---|---|
 | OpenSpec | [features/openspec](openspec/README.md) | 扫描工作区各仓库的 `openspec/changes/`，平铺成一行一条，第一列是状态标签（进行/待办/异常/完成/无单）；状态轨道筛选，点开看任务与未完成项 |
-| 对话 | [features/conversation](conversation/README.md) | 一轮一行：输入、回答、工具、耗时、token、结束原因；长内容折叠 |
+| 对话 | [features/conversation](conversation/README.md) | 一轮一行：输入、回答、工具、耗时、token、结束原因；统计轨道含成本、5h / 7d 额度与 CTX 构成页；长内容折叠 |
 | MCP | [features/mcp](mcp/README.md) | 按服务器归档每次 MCP 调用：参数、结果、成败、耗时 |
 | 提示音 | [features/sounds](sounds/README.md) | 总开关 + 决策/完成/异常三类提示音，点行切换、点「试听」当场发声 |
 | 其他 | [features/other](other/README.md) | 功能入口；prompt 收藏：命令添加、点行复制、按次数排序、二次确认删除 |

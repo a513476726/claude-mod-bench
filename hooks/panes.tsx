@@ -1,9 +1,10 @@
 import type { EngineInterface, PluginOptions, RenderElement, RenderSurface, UiPressArgument } from 'claude-code'
 
-import type { Branch, ScanState, SoundSettings } from '../types'
+import type { Branch, Meter, ScanState, SoundSettings } from '../types'
 import { statsOf } from './conversation'
 import { editorOf, type DiffGroup, type DiffShown, type FileShown } from './files'
 import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, wrapKeep } from './format'
+import { quotaOf, usdOf, type BreakdownRow, type BreakdownStore } from './meter'
 import {
   DETAIL_BUDGET,
   GROUP_ORDER,
@@ -126,6 +127,55 @@ export function soundColsOf(columns: number): Col[] {
   ]
 }
 
+/** One optional reading at the end of the conversation rail. */
+export type RailPart = { key: 'ctx' | 'five_hour' | 'seven_day' | 'usd'; text: string; tone: Tone }
+
+/**
+ * The rail's tail, selected by width. The full head is tried first; within it,
+ * parts are kept in display order and dropped in reverse (cost, then the seven-day
+ * window, then the five-hour one, then CTX). Only when even the full head alone
+ * does not fit are `缓存读 / 缓存写` shortened to `读 / 写` — by then every part is
+ * gone, which is the order the spec promises. The row never wraps.
+ */
+export function railOf(
+  base: string,
+  narrow: string,
+  reading: { text: string; tone: Tone },
+  meter: Meter,
+  room: number,
+): { head: string; parts: RailPart[] } {
+  const isFull = cellsOf(base) <= room
+  const head = isFull ? base : cellsOf(narrow) <= room ? narrow : endClip(narrow, Math.max(1, room))
+  const five = quotaOf(meter, 'five_hour')
+  const seven = quotaOf(meter, 'seven_day')
+  const candidates: RailPart[] = [
+    { key: 'ctx', text: ` · CTX ${reading.text}`, tone: reading.tone },
+    ...(five === undefined ? [] : [{ key: 'five_hour' as const, text: ` · 5h ${five.text}`, tone: five.tone as Tone }]),
+    ...(seven === undefined ? [] : [{ key: 'seven_day' as const, text: ` · 7d ${seven.text}`, tone: seven.tone as Tone }]),
+    { key: 'usd', text: ` · ${usdOf(meter.usd)}`, tone: 'subtle' as Tone },
+  ]
+  const parts: RailPart[] = []
+
+  if (!isFull) {
+    return { head, parts }
+  }
+
+  let left = room - cellsOf(head)
+
+  for (const one of candidates) {
+    const width = cellsOf(one.text)
+
+    if (width > left) {
+      break
+    }
+
+    parts.push(one)
+    left -= width
+  }
+
+  return { head, parts }
+}
+
 /** The tab on show, the row the ring is on, and whether that row is open. */
 export type PaneState = {
   tab: TabId
@@ -160,6 +210,10 @@ export type PaneData = {
   stored: Parameters<typeof itemsOf>[1]
   /** The context window's fill, as the engine last measured it. */
   ctx: ContextFill
+  /** The session's cost and quota windows, read from the same usage call as `ctx`. */
+  meter: Meter
+  /** The context window by category, read on demand for the breakdown page. */
+  breakdown: BreakdownStore
   /** The saved prompts, in display order. */
   prompts: PromptStore
   branches: Branch[]
@@ -215,6 +269,10 @@ export type PaneActions = {
   editFile: (repo: string, rel: string) => Promise<void>
   /** Enter the prompt shelf, sorted as the person left it. */
   openPrompts: (next: PaneState) => Promise<void>
+  /** Read the context breakdown, then open its page. */
+  showBreakdown: (next: PaneState) => Promise<void>
+  /** Read the context breakdown again, staying on its page. */
+  refreshBreakdown: () => Promise<void>
   copyPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
   askDelete: (id: string) => Promise<void>
   cancelDelete: () => Promise<void>
@@ -544,28 +602,40 @@ export async function drawPane(
     const lead = stats.models.length === 0 ? '（暂无用量）' : `${rounds} 轮 · ${stats.models.length} 个模型  `
     const base = stats.models.length === 0 ? lead : `${lead}${tokensOf(stats.total, false)}`
     const narrow = stats.models.length === 0 ? lead : `${lead}${tokensOf(stats.total, true)}`
-    const tail = ` · CTX ${reading.text}`
 
-    // The context reading goes first when the row is tight: the list matters more.
+    // The context reading is a door of its own, so the rail is a row of parts: the
+    // session's own words, then CTX, then the quota windows and the cost.
     const room = columns - SP.inline - cellsOf('会话') - SP.inline
-    const hasCtx = cellsOf(base) + cellsOf(tail) <= room
-    const body = !hasCtx && cellsOf(base) > room ? narrow : base
-    // A row narrower than even the short form keeps its head and loses its tail:
-    // nothing here may wrap the rail into a second row.
-    const kept = cellsOf(body) > room ? endClip(body, room) : body
-    const summary = `${kept}${hasCtx ? tail : ''}`
+    const rail = railOf(base, narrow, reading, data.meter, room)
+    // What the row says, without the fixed `会话` tag: the tag is drawn by the button
+    // but is not part of the measured body, so a test can hold it to the page width.
+    const label = `${rail.head}${rail.parts.map(one => one.text).join('')}`
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
           <Text>{' '.repeat(SP.inline)}</Text>
-          <Button key="stat-models" label={summary} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.models], index: 0, isDetail: false })}>
+          <Button key="stat-models" label={label} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.models], index: 0, isDetail: false })}>
             <Text>
               <Text color={INK.accent}>会话</Text>
-              <Text color={INK.muted}>{`  ${kept}`}</Text>
-              {hasCtx ? <Text key="stat-ctx" color={reading.tone}>{tail}</Text> : null}
+              <Text color={INK.muted}>{`  ${rail.head}`}</Text>
             </Text>
           </Button>
+          {rail.parts.map(one => one.key === 'ctx' ? (
+            <Button
+              key="stat-ctx"
+              label={`CTX ${reading.text}`}
+              plain
+              onPress={() => void actions.showBreakdown({ ...state, tab: 'conversation', path: ['ctx'], index: 0, isDetail: false })}
+            >
+              <Text>
+                <Text>{' · '}</Text>
+                <Text color={one.tone}>{`CTX ${reading.text}`}</Text>
+              </Text>
+            </Button>
+          ) : (
+            <Text key={`stat-${one.key}`} color={one.tone}>{one.text}</Text>
+          ))}
         </Box>
         {rows < 20 ? null : (
           <Box flexDirection="row">
@@ -788,10 +858,80 @@ export async function drawPane(
     )
   }
 
+  /** One category of the context breakdown: name, tokens and share, in that order. */
+  const breakdownLine = (row: BreakdownRow, isTotal: boolean) => {
+    const tail = `${kmOf(row.tokens)} · ${row.percent}%`
+    const inner = Math.max(8, columns - SP.inline * 2)
+    const nameRoom = inner - cellsOf(tail) - SP.group
+
+    // Too narrow for a name column: the name gets its own row, the figures the next.
+    if (nameRoom < 8) {
+      return (
+        <Box key={isTotal ? 'breakdown-total' : `breakdown-${row.label}`} flexDirection="column">
+          <Text>{`${' '.repeat(SP.inline)}${row.label}`}</Text>
+          <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${tail}`}</Text>
+        </Box>
+      )
+    }
+
+    // A name longer than its column wraps, every character kept; the figures ride
+    // the first row so the reading stays one glance.
+    const lines = wrapKeep(row.label, nameRoom, 0)
+
+    return (
+      <Box key={isTotal ? 'breakdown-total' : `breakdown-${row.label}`} flexDirection="column">
+        {lines.map((line, at) => (
+          <Text key={`breakdown-${row.label}-${at}`}>
+            {`${' '.repeat(SP.inline)}${padCells(line, nameRoom)}${at === 0 ? tail : ' '.repeat(cellsOf(tail))}`}
+          </Text>
+        ))}
+      </Box>
+    )
+  }
+
+  /**
+   * The context window by category: a quiet page, largest category first, the total
+   * under a rule, and a refresh that re-reads only the breakdown.
+   */
+  const breakdownPage = () => {
+    const store = data.breakdown
+    const isMissing = store.error !== undefined || store.rows.length === 0
+
+    return quietPage('上下文构成', (
+      <Box flexDirection="column">
+        {store.error === undefined ? null : noteAt(store.error)}
+        {isMissing ? null : (
+          <>
+            {store.rows.map(row => breakdownLine(row, false))}
+            <Text color={INK.frame}>{ruleOf(columns)}</Text>
+            {breakdownLine({ label: '合计', tokens: store.total.tokens, percent: store.total.percent }, true)}
+          </>
+        )}
+        <Box flexDirection="row">
+          <Text>{' '.repeat(SP.inline)}</Text>
+          <Button key="breakdown-refresh" label="刷新" plain onPress={() => void actions.refreshBreakdown()}>
+            <Text color={INK.accent}>刷新</Text>
+          </Button>
+        </Box>
+      </Box>
+    ), {
+      aside: store.model ?? '',
+      onBack: () => actions.navigate({ ...state, path: [], index: 0, isDetail: false }),
+      isScrollable: store.rows.length + 3 > rows,
+    })
+  }
+
+
   // ------------------------------------------------------------- prompt shelf
 
   if (state.tab === 'other' && state.path[0] === 'prompts') {
     return promptsPage()
+  }
+
+  // --------------------------------------------------------- context breakdown
+
+  if (state.tab === 'conversation' && state.path[0] === 'ctx') {
+    return breakdownPage()
   }
 
   // ---------------------------------------------------------------- file page

@@ -652,3 +652,147 @@ test('the status tag is the row\'s only colour', async ($, on) => {
 
   await ui.unmount()
 })
+
+/** A square of the engine's context grid, as the breakdown page reads it. */
+function square(categoryName: string, tokens: number, percentage: number) {
+  return { categoryName, tokens, percentage, color: 'inactive', isFilled: tokens > 0, squareFullness: 1 }
+}
+
+/** The engine's usage with a breakdown, and where its calls are recorded. */
+function usageWorld(on: On, rows: () => { label: string; tokens: number; percent: number }[]) {
+  const calls: { breakdown?: string }[] = []
+
+  on('session.usage', (_, args) => {
+    calls.push(args as { breakdown?: string })
+
+    return {
+      value: {
+        startedAt: 0,
+        context: {
+          tokens: 620_000,
+          window: 1_000_000,
+          breakdown: {
+            categories: [],
+            totalTokens: 620_000,
+            maxTokens: 1_000_000,
+            rawMaxTokens: 1_000_000,
+            autocompactSource: 'auto',
+            percentage: 62,
+            gridRows: [rows().map(one => square(one.label, one.tokens, one.percent))],
+            model: 'opus',
+            memoryFiles: [],
+            mcpTools: [],
+            agents: [],
+            isAutoCompactEnabled: false,
+            apiUsage: null,
+          },
+        },
+        rateLimits: [],
+      },
+    }
+  })
+
+  return calls
+}
+
+async function breakdownUi($: Engine, columns = 100) {
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: 'stat-ctx' })
+
+  return ui
+}
+
+const textsOf = async (ui: Awaited<ReturnType<typeof mountOf>>) =>
+  (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+test('the context reading opens the breakdown, refreshes it, and never compacts', async ($, on) => {
+  world(on)
+
+  let rows = [
+    { label: 'System prompt', tokens: 120_000, percent: 12 },
+    { label: 'Messages', tokens: 420_000, percent: 42 },
+    { label: 'Free space', tokens: 380_000, percent: 38 },
+  ]
+  const calls = usageWorld(on, () => rows)
+  let compacts = 0
+
+  on('session.compact', () => {
+    compacts += 1
+
+    return { skip: 'test never compacts' }
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await breakdownUi($)
+  const page = await textsOf(ui)
+
+  // Largest first, with the engine's own total under a rule.
+  expect(page.indexOf('Messages')).toBeLessThan(page.indexOf('Free space'))
+  expect(page.indexOf('Free space')).toBeLessThan(page.indexOf('System prompt'))
+  expect(page).toContain('420K · 42%')
+  expect(page).toContain('合计')
+  // Only the local estimate was asked for: `full` would send token-count requests.
+  // The session's own read at start passes no arguments; the breakdown read is the
+  // one with a detail, and it is always `summary`.
+  expect(calls.filter(one => one.breakdown !== undefined)).toEqual([{ breakdown: 'summary' }])
+  expect(calls.some(one => (one as { breakdown?: string }).breakdown === 'full')).toBe(false)
+
+  rows = [
+    { label: 'Messages', tokens: 500_000, percent: 50 },
+    { label: 'Free space', tokens: 300_000, percent: 30 },
+  ]
+  await ui.press({ key: 'breakdown-refresh' })
+
+  expect(await textsOf(ui)).toContain('500K · 50%')
+  expect(calls.filter(one => one.breakdown !== undefined)).toHaveLength(2)
+
+  await ui.press({ key: 'back' })
+
+  // Back on the conversation list, and nothing was compacted on the way.
+  expect(await ui.find({ type: 'Button', key: 'stat-ctx' })).toBeDefined()
+  expect(compacts).toBe(0)
+
+  await ui.unmount()
+})
+
+test('an engine without a breakdown says so, and keeps its way back', async ($, on) => {
+  world(on)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1_000_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await breakdownUi($)
+
+  expect(await textsOf(ui)).toContain('引擎未提供构成')
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the breakdown wraps its names at 80, 40 and 24 columns without overflowing', async ($, on) => {
+  world(on)
+  usageWorld(on, () => [
+    { label: 'System prompt with a very long category name', tokens: 120_000, percent: 12 },
+    { label: 'Messages', tokens: 420_000, percent: 42 },
+  ])
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  // The rail is too tight for a CTX door at 24 columns, so enter once at a width
+  // that draws it; the page itself is what must hold at every width.
+  const entered = await breakdownUi($, 100)
+
+  await entered.unmount()
+
+  for (const columns of [80, 40, 24]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+    const texts = (await ui.findAll({ type: 'Text' })) as { text?: string }[]
+
+    for (const one of texts) {
+      expect(cellsOf(String(one.text ?? ''))).toBeLessThanOrEqual(columns)
+    }
+
+    await ui.unmount()
+  }
+})

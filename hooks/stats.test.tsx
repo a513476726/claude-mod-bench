@@ -5,6 +5,7 @@ import type { Engine } from 'claude-code/testing'
 import type { NoteSeen } from './conversation'
 import { attachTool, closeTurn, startTurn, statsOf, summaryOf } from './conversation'
 import { cellsOf } from './format'
+import { railOf } from './panes'
 
 const at = 1_700_000_000_000
 
@@ -313,7 +314,7 @@ test('the context reading changes colour at 70 and 90', async ($, on) => {
   const reading = async () => {
     const texts = (await ui.findAll({ type: 'Text' })) as { text?: string; props?: { color?: string } }[]
 
-    return texts.find(one => String(one.text ?? '').includes('· CTX') && one.props?.color !== undefined)
+    return texts.find(one => String(one.text ?? '').startsWith('CTX ') && one.props?.color !== undefined)
   }
 
   expect((await reading())?.text).toContain('CTX 62%')
@@ -381,3 +382,115 @@ test('the model drill writes its tokens in K and never a percentage', async ($, 
 
   await ui.unmount()
 })
+
+/** The engine's usage as the rail reads it: context, the ledger and the windows. */
+function metered(
+  on: On,
+  reading: () => { tokens?: number; window?: number; usd?: number; limits?: { kind: string; percentUsed: number }[] },
+) {
+  on('session.usage', () => {
+    const one = reading()
+    const window = one.window ?? 1_000_000
+
+    return {
+      value: {
+        startedAt: 0,
+        context: one.tokens === undefined ? { window } : { tokens: one.tokens, window },
+        rateLimits: one.limits ?? [],
+        ...(one.usd === undefined ? {} : { cost: { usd: one.usd } }),
+      },
+    }
+  })
+}
+
+async function railLabelAt($: Engine, columns: number) {
+  const ui = await mountAt($, columns)
+  const label = String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')
+
+  await ui.unmount()
+
+  return label
+}
+
+test('the rail ends with the context, the quota windows and the cost', async ($, on) => {
+  worked(on)
+  on('turn.complete', () => ({ text: 'ok' }))
+  metered(on, () => ({
+    tokens: 620_000,
+    usd: 0.42,
+    limits: [{ kind: 'five_hour', percentUsed: 38 }, { kind: 'seven_day', percentUsed: 61 }],
+  }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await typed($, '先跑几个命令')
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't-1', reason: 'answer', usage: RAIL_USAGE })
+
+  const label = await railLabelAt($, 140)
+
+  expect(label).toContain('· CTX 62% · 5h 38% · 7d 61% · $0.42')
+})
+
+test('a host without a ledger reads a dash, and a missing window is left out', async ($, on) => {
+  worked(on)
+  on('turn.complete', () => ({ text: 'ok' }))
+  metered(on, () => ({ tokens: 620_000 }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await typed($, '先跑几个命令')
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't-1', reason: 'answer', usage: RAIL_USAGE })
+
+  const label = await railLabelAt($, 140)
+
+  expect(label).toContain('$—')
+  expect(label).not.toContain('5h')
+  expect(label).not.toContain('7d')
+  expect(label).not.toContain('0%')
+})
+
+test('the rail drops cost, then seven days, then five hours, before the context', () => {
+  const reading = { text: '62%', tone: 'subtle' as const }
+  const meter = {
+    usd: 0.42,
+    rateLimits: [{ kind: 'five_hour', percentUsed: 38 }, { kind: 'seven_day', percentUsed: 61 }],
+  }
+  const ctxText = ' · CTX 62%'
+  const fiveText = ' · 5h 38%'
+  const sevenText = ' · 7d 61%'
+  const usdText = ' · $0.42'
+  const head = '6 轮 · 1 个模型  入 120K · 出 8K · 缓存读 340K · 缓存写 21K'
+  const keysAt = (room: number) => railOf(head, head, reading, meter, room).parts.map(one => one.key)
+  const whole = cellsOf(head) + cellsOf(ctxText) + cellsOf(fiveText) + cellsOf(sevenText) + cellsOf(usdText)
+
+  expect(keysAt(whole)).toEqual(['ctx', 'five_hour', 'seven_day', 'usd'])
+  expect(keysAt(whole - 1)).toEqual(['ctx', 'five_hour', 'seven_day'])
+  expect(keysAt(whole - 1 - cellsOf(sevenText) - 1)).toEqual(['ctx', 'five_hour'])
+  expect(keysAt(whole - 1 - cellsOf(sevenText) - cellsOf(fiveText) - 1)).toEqual(['ctx'])
+  expect(keysAt(whole - 1 - cellsOf(sevenText) - cellsOf(fiveText) - cellsOf(ctxText) - 1)).toEqual([])
+})
+
+test('at 80, 64 and 48 columns the rail never overflows, and drops from the right', async ($, on) => {
+  worked(on)
+  on('turn.complete', () => ({ text: 'ok' }))
+  metered(on, () => ({
+    tokens: 620_000,
+    usd: 0.42,
+    limits: [{ kind: 'five_hour', percentUsed: 38 }, { kind: 'seven_day', percentUsed: 61 }],
+  }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await typed($, '先跑几个命令')
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't-1', reason: 'answer', usage: RAIL_USAGE })
+
+  for (const columns of [80, 64, 48]) {
+    const label = await railLabelAt($, columns)
+
+    expect(cellsOf(label)).toBeLessThanOrEqual(columns - 8)
+    // Whatever survived keeps the left-to-right order: a later part never outlives
+    // an earlier one.
+    const at = (part: string) => label.indexOf(part)
+    const order = ['CTX', '5h', '7d', '$'].filter(part => at(part) !== -1)
+
+    expect(order).toEqual(['CTX', '5h', '7d', '$'].slice(0, order.length))
+  }
+})
+

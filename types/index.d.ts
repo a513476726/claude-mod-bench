@@ -144,6 +144,27 @@ export type Branch = {
   changes: number
 }
 
+/** What the session has spent, and how much of each quota window it has used. */
+export type Meter = {
+  /** US dollars the session has cost, as the engine's ledger totals it; absent where the host keeps none. */
+  usd?: number
+  /** The rate-limit windows the last response reported; empty before any reading. */
+  rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[]
+}
+
+/** One category of the context window, as the breakdown page lists it. */
+export type BreakdownRow = { label: string; tokens: number; percent: number }
+
+/** The context window split by category, with its total and the model measured. */
+export type Breakdown = {
+  rows: BreakdownRow[]
+  total: { tokens: number; percent: number }
+  model?: string
+}
+
+/** What the pane reads for the breakdown page: the reading, or why there is none. */
+export type BreakdownStore = Breakdown & { isLoaded: boolean; error?: string }
+
 /** Which alerts sound, and how. */
 export type SoundSettings = {
   isOn: boolean
@@ -172,6 +193,10 @@ declare module 'claude-code' {
       /** The live context window's fill, as the engine last measured it: the model's
        * window, and the input side of the last response once one has come back. */
       ctx: Shaped<{ tokens?: number; window: number }>
+      /** The session's cost and the quota windows the last response reported. */
+      meter: Shaped<Meter>
+      /** The context window by category, read on demand for the breakdown page. */
+      breakdown: Shaped<BreakdownStore>
       /** The saved prompts in display order, and why the file could not be read. */
       prompts: Shaped<{ list: Prompt[]; error?: string }>
       sounds: Shaped<SoundSettings>

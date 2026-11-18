@@ -364,3 +364,122 @@ test('a tight band sheds its counts before it sheds the context', async ($, on) 
   const tooTight = await lineOf(30)
   expect(tooTight).not.toContain('CTX')
 })
+
+/** The engine's usage as the pane reads it: context, ledger and windows together. */
+function usageReading(
+  on: On,
+  reading: () => { tokens?: number; usd?: number; limits?: { kind: string; percentUsed: number }[] },
+) {
+  on('session.usage', () => {
+    const one = reading()
+
+    return {
+      value: {
+        startedAt: 0,
+        context: one.tokens === undefined ? { window: 1_000_000 } : { tokens: one.tokens, window: 1_000_000 },
+        rateLimits: one.limits ?? [],
+        ...(one.usd === undefined ? {} : { cost: { usd: one.usd } }),
+      },
+    }
+  })
+}
+
+/** The conversation rail's own words, at a width that fits them all. */
+async function railLabel($: Engine, columns = 140) {
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-conversation' })
+
+  const label = String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')
+
+  await ui.unmount()
+
+  return label
+}
+
+test('a session’s start reads the cost and quota beside the context', async ($, on) => {
+  quiet(on)
+  usageReading(on, () => ({
+    tokens: 620_000,
+    usd: 0.42,
+    limits: [{ kind: 'five_hour', percentUsed: 38 }, { kind: 'seven_day', percentUsed: 61 }],
+  }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const label = await railLabel($)
+
+  expect(label).toContain('CTX 62%')
+  expect(label).toContain('5h 38%')
+  expect(label).toContain('7d 61%')
+  expect(label).toContain('$0.42')
+})
+
+test('a measurement moves the cost and quota with the context', async ($, on) => {
+  quiet(on)
+  usageReading(on, () => ({ tokens: 620_000, usd: 0.42, limits: [{ kind: 'five_hour', percentUsed: 38 }] }))
+  on('session.measure', () => ({ changed: ['context', 'rateLimits', 'cost'] }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 140 }, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-conversation' })
+
+  const labelOf = async () => String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')
+
+  expect(await labelOf()).toContain('$0.42')
+
+  await $.session.measure({
+    context: { tokens: 700_000, window: 1_000_000 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 80 }],
+    cost: { usd: 1.2 },
+    changed: ['context', 'rateLimits', 'cost'],
+  } as never)
+
+  const label = await labelOf()
+
+  expect(label).toContain('CTX 70%')
+  expect(label).toContain('5h 80%')
+  expect(label).toContain('$1.20')
+
+  await ui.unmount()
+})
+
+test('a turn’s end re-reads the ledger where no measurement came', async ($, on) => {
+  quiet(on)
+  on('turn.complete', () => ({ text: 'ok' }))
+
+  let usd = 0.42
+
+  usageReading(on, () => ({ tokens: 620_000, usd }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 140 }, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-conversation' })
+
+  expect(String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')).toContain('$0.42')
+
+  usd = 2.1
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't-1', reason: 'answer' })
+
+  expect(String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')).toContain('$2.10')
+
+  await ui.unmount()
+})
+
+test('a host without a ledger keeps the dash and never invents a window', async ($, on) => {
+  quiet(on)
+  usageReading(on, () => ({ tokens: 620_000 }))
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const label = await railLabel($)
+
+  expect(label).toContain('$—')
+  expect(label).not.toContain('5h')
+  expect(label).not.toContain('7d')
+  expect(label).not.toContain('0%')
+})

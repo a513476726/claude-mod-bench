@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, RenderSurface } from 'claude-code'
 
-import type { Branch, Call, ScanState, SoundSettings, SpecChange, Turn } from '../types'
+import type { Branch, Call, Meter, ScanState, SoundSettings, SpecChange, Turn } from '../types'
 import {
   NOISE_PROMPT,
   attachTool,
@@ -16,6 +16,7 @@ import {
 import { editorOf, editFile, openDiff, openFile, readTextOf, rootOf, type DiffShown, type FileShown } from './files'
 import { capMark, capText, cellsOf, ctxOf } from './format'
 import { NO_FILTER } from './items'
+import { breakdownOf, NO_BREAKDOWN, type BreakdownStore } from './meter'
 import { drawPane, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
 import {
   addPrompt,
@@ -83,6 +84,13 @@ const branches = atom({ plugin: 'bench', key: 'branches' } as const, [] as Branc
  * turn and read once at the start. The pane and the band only read this; nothing
  * here derives it from turn usage, which the engine reports summed. */
 const ctx = atom({ plugin: 'bench', key: 'ctx' } as const, { window: 0 } as ContextFill, { shape: 'ctx-1' })
+/** The session's own ledger and quota windows: one `$.session.usage()` read writes
+ * this and the context fill together, so the two never come from different moments. */
+const meter = atom({ plugin: 'bench', key: 'meter' } as const, { rateLimits: [] } as Meter, { shape: 'meter-1' })
+/** The context window by category, read on demand for the breakdown page. */
+const breakdown = atom({ plugin: 'bench', key: 'breakdown' } as const, NO_BREAKDOWN as BreakdownStore, {
+  shape: 'breakdown-1',
+})
 /** The saved prompts, in display order, and why the file could not be read. */
 const prompts = atom({ plugin: 'bench', key: 'prompts' } as const, { list: [] } as PromptStore, { shape: 'prompts-1' })
 const diff = atom({ plugin: 'bench', key: 'diff' } as const, null as DiffShown | null, { shape: 'diff-3' })
@@ -217,19 +225,67 @@ async function rememberCtx($: EngineInterface, context: ContextFill): Promise<vo
   )
 }
 
-/** One read of the engine's own figures; a host that cannot answer keeps the last one. */
-async function refreshCtx($: EngineInterface): Promise<void> {
-  let usage: { context: ContextFill } | null = null
+/** The ledger and the quota windows, written only when they moved. A host without
+ * a ledger leaves `usd` undefined; a host with no reading leaves the windows empty. */
+async function rememberMeter($: EngineInterface, next: Meter): Promise<void> {
+  const before = await read($, meter)
+
+  if (before.usd === next.usd && JSON.stringify(before.rateLimits) === JSON.stringify(next.rateLimits)) {
+    return
+  }
+
+  await update($, meter, () => next)
+}
+
+/** One read of the engine's own figures, or the event's own reading where it carries
+ * one; a host that cannot answer keeps the last one. */
+async function refreshUsage(
+  $: EngineInterface,
+  reading?: { context: ContextFill; rateLimits?: Meter['rateLimits']; cost?: { usd: number } },
+): Promise<void> {
+  let usage = reading ?? null
+
+  if (usage === null) {
+    try {
+      usage = await $.session.usage()
+    } catch {
+      usage = null
+    }
+  }
+
+  if (usage === null) {
+    return
+  }
+
+  await rememberCtx($, usage.context)
+  await rememberMeter($, { usd: usage.cost?.usd, rateLimits: usage.rateLimits ?? [] })
+}
+
+/**
+ * One read of the context window by category, for the breakdown page. `summary`
+ * counts locally and sends no token-count request; a reading without a breakdown
+ * is said so, not drawn as an empty table.
+ */
+async function loadBreakdown($: EngineInterface): Promise<void> {
+  let usage: { context: { breakdown?: Parameters<typeof breakdownOf>[0] } } | null = null
 
   try {
-    usage = await $.session.usage()
-  } catch {
-    usage = null
+    usage = await $.session.usage({ breakdown: 'summary' })
+  } catch (thrown) {
+    const why = String(thrown instanceof Error ? thrown.message : thrown)
+
+    await update($, breakdown, () => ({ ...NO_BREAKDOWN, isLoaded: true, error: `读取失败：${why}` }))
+
+    return
   }
 
-  if (usage !== null) {
-    await rememberCtx($, usage.context)
-  }
+  const built = breakdownOf(usage.context.breakdown)
+
+  await update($, breakdown, () =>
+    built === undefined
+      ? { ...NO_BREAKDOWN, isLoaded: true, error: '引擎未提供构成' }
+      : { ...built, isLoaded: true },
+  )
 }
 
 const PROMPT_FILE = '.claude/bench-prompts.json'
@@ -360,7 +416,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'panel', description: TITLE })
     await registerCommands($)
     await loadPrompts($)
-    await refreshCtx($)
+    await refreshUsage($)
 
     // The engine itself says why a pane waits: a floor it fell under, or a surface
     // that places none. Guessing at the width hid the real cause once already.
@@ -385,7 +441,7 @@ export const register: Register = (on, options) => {
   // The engine's own measurement: the only push the context window has. A turn's
   // usage is summed across its requests, so it is never read as the window's fill.
   on('session.measure', async ($, e, next) => {
-    await rememberCtx($, e.context)
+    await refreshUsage($, e)
 
     return next(e)
   })
@@ -463,8 +519,11 @@ export const register: Register = (on, options) => {
     }
 
     // The measurement normally lands on its own; a host that omits it (or races
-    // the turn) still gets the fresh figures here.
-    await refreshCtx($)
+    // the turn) still gets the fresh figures here — on the person's own round, not
+    // a subagent's, whose spend is already inside the session's ledger.
+    if (e.agentId === undefined) {
+      await refreshUsage($)
+    }
 
     return next(e)
   })
@@ -659,6 +718,8 @@ export const register: Register = (on, options) => {
         },
         scanState: await read($, scanState),
         ctx: await read($, ctx),
+        meter: await read($, meter),
+        breakdown: await read($, breakdown),
         prompts: await read($, prompts),
         branches: await read($, branches),
         diff: await read($, diff),
@@ -704,6 +765,12 @@ export const register: Register = (on, options) => {
           })
           await navigate($, { view: { ...next, pendingDelete: null } })
         },
+        /** The breakdown is read before the page is shown, so the page never flashes empty. */
+        showBreakdown: async (next: PaneState) => {
+          await loadBreakdown($)
+          await navigateView($, next)
+        },
+        refreshBreakdown: () => loadBreakdown($),
         copyPrompt: async (id: string, text: string, surface: RenderSurface) => {
           const copied = await $.ui.copy({ text, surface })
 
