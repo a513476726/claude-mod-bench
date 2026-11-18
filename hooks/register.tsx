@@ -253,16 +253,18 @@ async function savePrompts($: EngineInterface, list: Prompt[]): Promise<void> {
 }
 
 /**
- * The file at the start: a missing one is an empty shelf, a broken one is an
+ * The file as the shelf: a missing one is an empty shelf, a broken one is an
  * empty shelf that says why — and is left untouched until the next real write.
+ *
+ * The file is asked every time, never the session's copy of it alone: a `/clear`
+ * ends the session and starts another with no `session.start` after it, so the
+ * state the first session read is gone while the file still holds every prompt.
  */
-async function loadPrompts($: EngineInterface): Promise<void> {
+async function readShelf($: EngineInterface): Promise<PromptStore> {
   const path = await promptFileOf($)
 
   if (path === null) {
-    await update($, prompts, () => ({ list: [], error: 'HOME 未设置，收藏无法读写' }))
-
-    return
+    return { list: [], error: 'HOME 未设置，收藏无法读写' }
   }
 
   let text: string
@@ -273,9 +275,7 @@ async function loadPrompts($: EngineInterface): Promise<void> {
     const why = String(thrown instanceof Error ? thrown.message : thrown)
     const isMissing = /ENOENT|no such file/i.test(why)
 
-    await update($, prompts, () => (isMissing ? { list: [] } : { list: [], error: `读取失败：${why}` }))
-
-    return
+    return isMissing ? { list: [] } : { list: [], error: `读取失败：${why}` }
   }
 
   let raw: unknown = null
@@ -287,18 +287,33 @@ async function loadPrompts($: EngineInterface): Promise<void> {
   }
 
   if (raw === null || typeof raw !== 'object' || !Array.isArray((raw as { prompts?: unknown }).prompts)) {
-    await update($, prompts, () => ({ list: [], error: '读取失败：收藏文件格式不对' }))
-
-    return
+    return { list: [], error: '读取失败：收藏文件格式不对' }
   }
 
   const parsed = parsePrompts(text)
   const rawPrompts = (raw as { prompts: unknown[] }).prompts
 
-  await update($, prompts, () => ({
-    list: sortPrompts(parsed),
-    ...(parsed.length === rawPrompts.length ? {} : { error: '读取失败：部分条目已损坏' }),
-  }))
+  return parsed.length === rawPrompts.length
+    ? { list: sortPrompts(parsed) }
+    : { list: sortPrompts(parsed), error: '读取失败：部分条目已损坏' }
+}
+
+/** The shelf at the session's start: what the pane draws before anyone asks for it. */
+async function loadPrompts($: EngineInterface): Promise<void> {
+  const shelf = await readShelf($)
+
+  await update($, prompts, () => shelf)
+}
+
+/**
+ * The shelf a write starts from: the file where it reads, else the shelf this
+ * session already drew, so a copy or a delete still lands while the file cannot
+ * be read — and the next real write replaces the file it could not read.
+ */
+async function writeShelf($: EngineInterface): Promise<PromptStore> {
+  const shelf = await readShelf($)
+
+  return shelf.error === undefined ? shelf : await read($, prompts)
 }
 
 
@@ -394,7 +409,7 @@ export const register: Register = (on, options) => {
         return { text: '用法：/panel-prompt-add <单行文本>' }
       }
 
-      const current = await read($, prompts)
+      const current = await writeShelf($)
       const { list, isAdded } = addPrompt(current.list, text, await $.clock.now())
 
       if (!isAdded) {
@@ -683,9 +698,9 @@ export const register: Register = (on, options) => {
           editFile($, repo, rel, editorOf(options), value => navigate($, { file: value })),
         openPrompts: async (next: PaneState) => {
           await withPrompts(async () => {
-            const current = await read($, prompts)
+            const shelf = await readShelf($)
 
-            await update($, prompts, prev => ({ ...prev, list: sortPrompts(current.list) }))
+            await update($, prompts, () => shelf)
           })
           await navigate($, { view: { ...next, pendingDelete: null } })
         },
@@ -699,7 +714,7 @@ export const register: Register = (on, options) => {
           }
 
           await withPrompts(async () => {
-            const current = await read($, prompts)
+            const current = await writeShelf($)
 
             // The prompt may have been deleted while the clipboard was written.
             if (!current.list.some(one => one.id === id)) {
@@ -727,7 +742,7 @@ export const register: Register = (on, options) => {
         cancelDelete: () => update($, view, prev => ({ ...prev, pendingDelete: null })).then(() => undefined),
         confirmDelete: (id: string) =>
           withPrompts(async () => {
-            const current = await read($, prompts)
+            const current = await writeShelf($)
             const list = removePrompt(current.list, id)
 
             try {

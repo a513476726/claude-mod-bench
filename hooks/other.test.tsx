@@ -27,9 +27,13 @@ const PROMPTS = JSON.stringify({
   ],
 })
 
-/** A quiet session with the prompt file already saved at the tester's home. */
+/** A quiet session with the prompt file already saved at the tester's home. A
+ * write lands in that file, as one does at home: what a page reads next is what
+ * the last page wrote, never the file it started with. */
 function quiet(on: On, file = PROMPTS, onWrite?: (e: { path: string; text: string }) => 'deny' | void) {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  let shelf = file
+
   on('command.register', () => ({ value: { command: 'panel' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -39,11 +43,17 @@ function quiet(on: On, file = PROMPTS, onWrite?: (e: { path: string; text: strin
   on('fs.list', () => ({ value: [] }))
   on('fs.read', (_, e) => {
     if (e.path.endsWith('/.git/HEAD')) return { value: 'ref: refs/heads/main\n' }
-    if (e.path.endsWith('bench-prompts.json')) return { value: file }
+    if (e.path.endsWith('bench-prompts.json')) return { value: shelf }
 
     return { deny: 'ENOENT' }
   })
-  on('fs.write', (_, e) => (onWrite?.(e) === 'deny' ? { deny: 'EACCES' } : { value: undefined }))
+  on('fs.write', (_, e) => {
+    if (onWrite?.(e) === 'deny') return { deny: 'EACCES' }
+
+    if (e.path.endsWith('bench-prompts.json')) shelf = e.text
+
+    return { value: undefined }
+  })
 
   return clock
 }
@@ -281,6 +291,22 @@ test('an empty shelf says how to add one', async ($, on) => {
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
   expect(page).toContain('还没有收藏。用 /panel-prompt-add 添加。')
+
+  await ui.unmount()
+})
+
+test('a shelf entered after a /clear lists what the file holds', async ($, on) => {
+  quiet(on)
+
+  // No session.start: a /clear ends the session and starts another with no start
+  // hook after it, so the shelf the first session read is gone while the file
+  // still holds every prompt.
+  const ui = await entered($)
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('第一条')
+  expect(page).toContain('第二条')
+  expect(page).not.toContain('还没有收藏')
 
   await ui.unmount()
 })

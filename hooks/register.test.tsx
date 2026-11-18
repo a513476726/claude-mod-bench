@@ -123,9 +123,13 @@ const BAND = {
 }
 
 /** The saved prompts live under the person's home; the test's home is fixed. */
-function promptHome(on: On, file: string | null) {
+function promptHome(on: On, file: string | null | (() => string | null)) {
   on('env.get', () => ({ value: '/home/tester' }))
-  on('fs.read', () => (file === null ? { deny: 'ENOENT' } : { value: file }))
+  on('fs.read', () => {
+    const text = typeof file === 'function' ? file() : file
+
+    return text === null ? { deny: 'ENOENT' } : { value: text }
+  })
 }
 
 test('the add command saves one prompt and refuses an exact duplicate', async ($, on) => {
@@ -134,11 +138,16 @@ test('the add command saves one prompt and refuses an exact duplicate', async ($
   quiet(on, () => {
     opens += 1
   })
-  promptHome(on, null)
+
+  // The add writes the file and the next add reads that file back, as at home.
+  let shelf: string | null = null
+
+  promptHome(on, () => shelf)
 
   const written: { path?: string; text?: string } = {}
 
   on('fs.write', (_, e) => {
+    shelf = e.text
     written.path = e.path
     written.text = e.text
 
@@ -178,6 +187,28 @@ test('the file is read at the start, so a saved prompt is already known', async 
   const again = await $.command.run({ command: 'panel-prompt-add', args: '已有' } as never)
 
   expect(again.text).toBe('已存在：已有')
+})
+
+test('an add after a /clear keeps what the file holds, not the empty state', async ($, on) => {
+  quiet(on)
+  promptHome(on, '{"version":1,"prompts":[{"id":"a","text":"已有","copies":2,"createdAt":1}]}')
+
+  let written = ''
+
+  on('fs.write', (_, e) => {
+    written = e.text
+
+    return { value: undefined }
+  })
+
+  // No session.start: a /clear ends the session and starts another with no start
+  // hook after it, so the shelf the first session read is gone and the file alone
+  // still holds 「已有」.
+  const added = await $.command.run({ command: 'panel-prompt-add', args: '新的' } as never)
+
+  expect(added.text).toBe('已收藏：新的')
+  expect(written).toContain('已有')
+  expect(written).toContain('新的')
 })
 
 test('a broken file reads as none, and the next add writes a sound one', async ($, on) => {

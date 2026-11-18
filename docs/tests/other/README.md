@@ -23,16 +23,17 @@ claude plugin test . 2>&1 | grep -A30 other      # 页签与功能页
 | serialize round-trips through parse | 写入格式能被原样读回 |
 | the first line skips empty leading lines | 行摘要取第一条非空行，全空回 `（空）` |
 
-### 命令（`hooks/register.test.tsx`，其中 4 条）
+### 命令（`hooks/register.test.tsx`，其中 5 条）
 
 | 测试 | 验的是什么 |
 |---|---|
 | the add command saves one prompt and refuses an exact duplicate | `/panel-prompt-add` 写文件到 `~/.claude/bench-prompts.json`；重复回「已存在」 |
 | the add command explains itself when no text came | 空参数只回用法，不写文件 |
 | the file is read at the start, so a saved prompt is already known | `session.start` 读文件；已存在的文本能触发去重 |
+| an add after a /clear keeps what the file holds, not the empty state | `/clear` 后没有 `session.start`：添加仍先读文件，不把已有收藏覆盖掉 |
 | a broken file reads as none, and the next add writes a sound one | 损坏文件按空处理，下一次写入是干净 JSON |
 
-### 页签与功能页（`hooks/other.test.tsx`，18 条）
+### 页签与功能页（`hooks/other.test.tsx`，19 条）
 
 | 测试 | 验的是什么 |
 |---|---|
@@ -41,11 +42,12 @@ claude plugin test . 2>&1 | grep -A30 other      # 页签与功能页
 | the saved prompts are read in order, each with its copy count | 行按次数排序，显示 `×N` |
 | a row copies the whole text, counts, and says so until it fades | 复制的是全文（含换行），次数 +1、写文件、页脚「已复制」；2.5 秒后提示消失 |
 | a failed copy says why and leaves the count alone | 复制失败显示原因，次数不变 |
-| a copy does not reorder the page; entering it again does | 复制后不跳；重新进入后按新次数重排 |
+| a copy does not reorder the page; entering it again does | 复制后不跳；重新进入（重读文件）后按新次数重排 |
 | a delete asks twice, a cancel keeps the prompt, and a confirm is written | 「删除 → 取消」保留；「删除 → 删除」移除并写回文件 |
 | the confirmation fits a 24-column row | 24 列下确认态仍画出「删除 / 取消」 |
 | a broken file says so and is not rewritten by opening it | 损坏文件显示「读取失败」，打开页面不写文件 |
 | an empty shelf says how to add one | 空收藏显示 `/panel-prompt-add` 提示 |
+| a shelf entered after a /clear lists what the file holds | `/clear` 后没有 `session.start`：进入页面仍从文件读出全部收藏 |
 | a copy that cannot be saved still counts, and says why | 写文件失败时次数仍 +1，页脚显示「已复制（保存失败）」 |
 | the footer counts five tabs | 页脚显示 `1–5 页签` |
 | a narrow shelf drops the copy counts before the words | 56 列保留 `×N`，55 列丢弃但保留文本与删除 |
