@@ -108,6 +108,7 @@ git merge --no-ff auto/bench-product-optimization
 | 日期 | Change | 验证 | 提交 |
 |---|---|---|---|
 | 2026-11-18 | 批次建立 | `openspec validate --all --strict` 13/13 通过；`./scripts/acceptance.sh --pre` 通过 | `0e65335` |
+| 2026-11-18 | bench-iteration-1-meter | `tsc` 0 错误；`claude plugin test .` 173 pass / 0 fail；`claude plugin validate .` 通过（仅 icon 既有警告）；`openspec validate --all --strict` 13/13；已归档 | `e1a2ff1` |
 
 ## 8. 基线遗留（不在本批次范围）
 
