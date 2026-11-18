@@ -22,6 +22,21 @@ context: |
     docs/SKILL.md 与 docs/UI-SPEC.md 成文，**不要在 spec 里抄写**，改为在那里维护。
   - 代码模块拆分属于 design.md 的「实现约束」，不进 spec。
 
+  ## Apply 执行协议（superpowers）
+  apply 阶段 MUST 以 superpowers 技能执行；OpenSpec 仍是流程控制器，superpowers 只在
+  apply 内部承担方案探索与实施：
+  - 计划执行：`superpowers:executing-plans`，计划文件为 `openspec/changes/<change>/tasks.md`。
+  - 行为实现：`superpowers:test-driven-development`（先写失败测试，再实现，再重构）。
+  - 失败排查：`superpowers:systematic-debugging`，禁止猜测式修复。
+  - 完成前验证：`superpowers:verification-before-completion`，报告实际输出。
+  - 代码评审：`superpowers:requesting-code-review`；收到意见用 `superpowers:receiving-code-review`。
+  - 收尾：`superpowers:finishing-a-development-branch`。
+  - UI 前置门：任何 UI 评审、规范产出或 UI 实现前，MUST 先调用
+    `frontend-design:frontend-design`，按 `docs/UI-SPEC.md` 与
+    `.claude/skills/bench-ui/SKILL.md` 核对并补齐规范；缺口未补齐不得改 UI 代码。
+  三角色流程保留为 apply 内层的评审结构；评审代理只读，写入方唯一。
+  项目级入口见 `.claude/skills/openspec-apply-superpowers/SKILL.md`。
+
 rules:
   proposal:
     - 写清「为什么现在做」和「不改会怎样」
@@ -33,13 +48,21 @@ rules:
     - 每个任务可独立验证，粒度不超过一个文件的一处改动
     - 最后一个任务固定为「三项验证：tsc / claude plugin test . / claude plugin validate .」
     - 新增 atom 的任务必须同时写明同步 types/index.d.ts 并递增 shape
+    - apply 时 tasks.md 作为 `superpowers:executing-plans` 的计划；每个行为任务先写测试（`superpowers:test-driven-development`），测试失败再实现
 
 operations:
   apply:
     guidance:
+      - 进入 apply 前先读 change 的 proposal / design / specs / tasks，并确认 `openspec validate <change> --strict` 通过
       - 实施前先跑一遍三项验证，确认基线是绿的；不绿先停下报告
+      - 按 `superpowers:executing-plans` 执行 tasks.md；每个行为任务走 `superpowers:test-driven-development`（red → green → refactor）
+      - 遇到测试失败或意外行为，先用 `superpowers:systematic-debugging` 定位，不得猜测式修复
       - 新增/修改行为必须配 hooks/*.test.tsx，覆盖空态与一条数据
-      - 完成后报告三项验证的**实际输出**，不得用「应该通过」代替
+      - UI 相关任务：先调用 `frontend-design:frontend-design`，按 `docs/UI-SPEC.md` 与 `.claude/skills/bench-ui/SKILL.md` 的设计前置门核对并补齐规范，再实施 UI；未过门不得改 UI 代码
+      - 声称完成前用 `superpowers:verification-before-completion` 跑三项验证并贴出实际输出，不得用「应该通过」代替
+      - 完成后用 `superpowers:requesting-code-review` 做独立评审；收到意见走 `superpowers:receiving-code-review`
+      - 收尾用 `superpowers:finishing-a-development-branch`；未获用户明确要求，不得自动 commit / push
   archive:
     guidance:
+      - 归档前用 `superpowers:verification-before-completion` 复核三项验证与文档回归证据
       - 归档前确认三项验证全绿，且 docs/SKILL.md / UI-SPEC.md 已随行为变化更新

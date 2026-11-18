@@ -1,4 +1,5 @@
 import type { Turn, TurnTool } from '../types'
+import { capMark, capText } from './format'
 import { nameOf } from './panes'
 
 /**
@@ -66,7 +67,7 @@ export function startTurn(
     id: turn.id,
     kind: turn.kind,
     at: turn.at,
-    text: turn.text.slice(0, MAX_TEXT),
+    text: capText(turn.text, MAX_TEXT, capMark(MAX_TEXT)),
     command: turn.command,
     attachments: turn.attachments ?? 0,
     isOpen: true,
@@ -86,7 +87,7 @@ export function closeTurn(turns: Turn[], id: string, end: EndSeen): Turn[] {
           isOpen: false,
           endReason: end.reason,
           durationMs: end.durationMs,
-          answer: end.answer.slice(0, MAX_TEXT),
+          answer: capText(end.answer, MAX_TEXT, capMark(MAX_TEXT)),
           usage:
             end.usage === undefined
               ? undefined
@@ -113,9 +114,9 @@ function bumpTool(tools: TurnTool[], name: string, note: NoteSeen): TurnTool[] {
     at: note.at,
     ms: note.ms,
     isOk: note.isOk,
-    summary: note.summary.slice(0, MAX_SUMMARY),
-    detail: note.detail.length > MAX_DETAIL ? `${note.detail.slice(0, MAX_DETAIL)}…` : note.detail,
-    result: note.result.length > MAX_RESULT ? `${note.result.slice(0, MAX_RESULT)}…` : note.result,
+    summary: capText(note.summary, MAX_SUMMARY, capMark(MAX_SUMMARY), false),
+    detail: capText(note.detail, MAX_DETAIL, capMark(MAX_DETAIL)),
+    result: capText(note.result, MAX_RESULT, capMark(MAX_RESULT)),
   }
 
   if (at < 0) {

@@ -227,7 +227,7 @@ test('a task ticked between turns reaches the list on its own period', async ($,
   await clocker.advance(5_000)
 
   // The tick lands without a turn ending: the change moves to 待归档 on its own period.
-  expect(await ui.find({ type: 'Button', key: 'head-ready' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'rail-ready' })).toBeDefined()
 
   await ui.unmount()
 })
@@ -269,7 +269,7 @@ test('every view offers the same return, in the corner', async ($, on) => {
   await ui.unmount()
 })
 
-test('a detail wraps a long value instead of cutting it, and names it with an icon', async ($, on) => {
+test('a detail wraps a long value instead of cutting it, and names it in plain text', async ($, on) => {
   const root = '/work/dev-panel'
 
   world(on, oneRepo(root))
@@ -279,8 +279,8 @@ test('a detail wraps a long value instead of cutting it, and names it with an ic
   await ui.press({ key: 'row-dev-panel/add-x' })
 
   const texts = (await ui.findAll({ type: 'Text' })).map(one => String((one as { text?: string }).text ?? ''))
-  // The label keeps its word beside its icon, and the value is not cut with an ellipsis.
-  expect(texts.some(one => one.includes('📁') && one.includes('仓库'))).toBe(true)
+  // The field label is plain text, and the value is not cut with an ellipsis.
+  expect(texts.some(one => one.includes('仓库'))).toBe(true)
   expect(texts.some(one => one.trim() === 'dev-panel')).toBe(true)
 
   // The value wraps rather than truncating: its Text says so, and no detail line
@@ -306,7 +306,7 @@ test('the filter narrows the list, and its counts follow', async ($, on) => {
 
   // One repo and one age: each press moves to the next choice and wraps.
   await ui.press({ key: 'filter-repo' })
-  expect((await ui.find({ type: 'Button', key: 'filter-repo' }))?.props.label).toBe('仓库：dev-panel')
+  expect((await ui.find({ type: 'Button', key: 'filter-repo' }))?.props.label).toBe('仓库 dev-panel')
   expect(await ui.find({ type: 'Text', text: /add-x/ })).toBeDefined()
 
   // A repo the change is not in: the list lets go of it.
@@ -316,7 +316,7 @@ test('the filter narrows the list, and its counts follow', async ($, on) => {
   // Back to every repo, then narrow by age: the change is older than today.
   await ui.press({ key: 'filter-repo' })
   await ui.press({ key: 'filter-since' })
-  expect((await ui.find({ type: 'Button', key: 'filter-since' }))?.props.label).toBe('时间：今天')
+  expect((await ui.find({ type: 'Button', key: 'filter-since' }))?.props.label).toBe('时间 今天')
 
   // One door back to everything.
   await ui.press({ key: 'filter-clear' })
@@ -387,7 +387,7 @@ test('a long value wraps by display width, keeping whole words where it can', ()
   expect(wrapCells('', 40)).toEqual([''])
 })
 
-test('a long field value wraps within the card, not a few cells past it', async ($, on) => {
+test('a long field value wraps within the page, not a few cells past it', async ($, on) => {
   const root = '/work/dev-panel'
 
   world(on, oneRepo(root))
@@ -398,9 +398,8 @@ test('a long field value wraps within the card, not a few cells past it', async 
 
   // Each row a detail draws for a wrapped value fits the card's inner width: a
   // row a few cells long is one the engine wraps again, mid-word.
-  const inner = 100 - 2 - 2
   const rows = (await ui.findAll({ type: 'Text' })).map(one => String((one as { text?: string }).text ?? ''))
-  const cut = rows.filter(one => cellsOf(one) > inner && one.trim() !== '' && !one.includes('╭') && !one.includes('╰'))
+  const cut = rows.filter(one => cellsOf(one) > 100 && one.trim() !== '' && !one.startsWith('─'))
   expect(cut).toEqual([])
 
   await ui.unmount()

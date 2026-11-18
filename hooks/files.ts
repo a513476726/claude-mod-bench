@@ -1,5 +1,6 @@
 import type { EngineInterface, PluginOptions } from 'claude-code'
 
+import { capText } from './format'
 import { discoverOf } from './scan'
 
 /**
@@ -119,7 +120,7 @@ export async function readTextOf($: EngineInterface, full: string): Promise<File
   }
 
   const isBinary = text.includes('\u0000')
-  const cut = text.length > 60_000 ? `${text.slice(0, 60_000)}\n…（文件过长，已截断）` : text
+  const cut = capText(text, 60_000, '…（文件超过 60,000 字，已截断）')
 
   return { text: isBinary ? '（二进制文件）' : cut, raw: text, isTrimmed: text.length > 60_000, isBinary, isUnread: false }
 }
@@ -190,7 +191,7 @@ export async function openDiff(
     const isFresh = one.isNew
 
     one.full = read.text
-    one.isTruncated = read.isTrimmed
+    one.isTruncated = one.isTruncated || read.isTrimmed
     one.isBinary = read.isBinary
     one.isUnread = read.isUnread
 
@@ -245,6 +246,8 @@ export function diffGroupsOf(text: string, fresh: string[], status: string): Dif
 
     const slice = lines.slice(start, end)
     const body = slice.join('\n')
+    const isCut = body.length > 60_000
+    const shown = capText(body, 60_000, '…（diff 超过 60,000 字，已截断）')
     const rel = pathOf(body)
     const isNew = slice.some(line => line.startsWith('new file mode') || line.trim() === '--- /dev/null')
     let added = 0
@@ -260,11 +263,11 @@ export function diffGroupsOf(text: string, fresh: string[], status: string): Dif
     const seen = out.findIndex(one => one.rel === rel)
 
     if (seen >= 0) {
-      out[seen] = { rel, text: body, full: '', added, removed, isNew, isTruncated: false, isBinary: false, isUnread: false }
+      out[seen] = { rel, text: shown, full: '', added, removed, isNew, isTruncated: isCut, isBinary: false, isUnread: false }
       return
     }
 
-    out.push({ rel: rel === '' ? '（未知文件）' : rel, text: body, full: '', added, removed, isNew, isTruncated: false, isBinary: false, isUnread: false })
+    out.push({ rel: rel === '' ? '（未知文件）' : rel, text: shown, full: '', added, removed, isNew, isTruncated: isCut, isBinary: false, isUnread: false })
   }
 
   for (let at = 0; at < lines.length; at += 1) {

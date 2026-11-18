@@ -64,8 +64,7 @@ const branchesShown = async (ui: { findAll: (query: { type: string }) => Promise
   for (const text of await ui.findAll({ type: 'Text' })) {
     const one = String(text.text ?? '')
 
-    // A branch row is the card's inside: the frame's side, the mark, the folder.
-    if (one.includes('根目录') || one.includes('| ')) {
+    if (one.trim() !== '') {
       texts.push(one)
     }
   }
@@ -158,6 +157,12 @@ test('any repo beside the workspace stands in the list, whatever its name', asyn
   await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const open = await ui.find({ type: 'Button', key: 'branch-all' })
+
+  if (open) {
+    await ui.press({ key: 'branch-all' })
+  }
+
   const texts = (await branchesShown(ui)).join('\n')
 
   expect(texts).toContain('根目录')
@@ -196,7 +201,7 @@ test('a checkout between turns reaches the branch line on the poll, not on the n
   await ui.unmount()
 })
 
-test('a workspace with more repos than the card shows offers to open the rest', async ($, on) => {
+test('a workspace with more repos than the rail shows offers to open the rest', async ($, on) => {
   const cwds = ['/ws/sales-platform']
   const names = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7']
 

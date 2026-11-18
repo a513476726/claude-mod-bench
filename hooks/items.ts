@@ -1,7 +1,8 @@
 import type { Call, SoundSettings, SpecChange, ToolNote, Turn } from '../types'
-import { ageColOf, agoOf, endClip, midClip, padCells, padLeft, spanOf, timeOf, whenOf } from './format'
+import { ageColOf, agoOf, cellsOf, endClip, kmOf, padCells, spanOf, timeOf, whenOf } from './format'
 import { isTroubled, statsOf } from './conversation'
 import { groupOf, type Group } from './scan'
+import { STATUS_TAG, type Tone } from './ui'
 
 /** The page and tab the detail is read from. */
 export type TabId = 'openspec' | 'conversation' | 'mcp' | 'sounds'
@@ -11,11 +12,11 @@ export type TabId = 'openspec' | 'conversation' | 'mcp' | 'sounds'
 export const GROUP_ORDER: Group[] = ['doing', 'ready', 'broken', 'archived', 'bare']
 
 export const GROUP_LABEL: Record<Group, string> = {
-  doing: '进行中',
-  ready: '待归档',
-  broken: '归档异常',
-  archived: '已归档',
-  bare: '无任务清单',
+  doing: STATUS_TAG.doing.full,
+  ready: STATUS_TAG.ready.full,
+  broken: STATUS_TAG.broken.full,
+  archived: STATUS_TAG.archived.full,
+  bare: STATUS_TAG.bare.full,
 }
 
 /** The columns every row shares, so one line's numbers stand under another's. */
@@ -46,10 +47,18 @@ export type Item = {
   /** A detail that has long bodies to fold: where the drawer meets `detailLines`. */
   sections?: { lead: string[]; sections: DetailSection[]; tail: string[]; tools: ToolToken[] }
   group?: Group
-  isWarn?: boolean
-  isNewest?: boolean
-  /** A row's own leading mark where spaces would not do (a conversation's `·`, `◆`, `↻`). */
-  mark?: string
+  /** The word the status/type column draws: 2 Chinese characters (1 at narrow widths). */
+  tag?: string
+  /** The colour that word speaks with. */
+  tone?: Tone
+  done?: string
+  age?: string
+  repo?: string
+  name?: string
+  time?: string
+  summary?: string
+  count?: number
+  last?: string
   /** The switch a row flips, where it is one: the page reads it instead of the id. */
   sound?: keyof SoundSettings
 }
@@ -62,11 +71,106 @@ export type Stored = {
   sounds: SoundSettings
 }
 
-/** What the OpenSpec list is narrowed to: one repo, one age, or all of each. */
-export type SpecFilter = { repo: string; since: 'all' | 'today' | '7d' | '30d' }
+/**
+ * How much one detail page may draw. The engine caps a tree at 100,000 serialized
+ * characters and 20,000 nodes, so the text budget alone is not enough: every row
+ * costs its characters plus the props and markup around it.
+ */
+export type DetailBudget = {
+  /** Estimated serialized characters: each row's text plus a fixed markup cost. */
+  serial: number
+  /** Rows, each a `Text`-sized node. */
+  rows: number
+}
+
+/** The budget one page starts with; a caller may pass a smaller one in a test. */
+export const DETAIL_BUDGET: DetailBudget = { serial: 70_000, rows: 1_500 }
+
+/** What a row costs beyond its own characters: keys, colours, styling, markup. */
+const ROW_OVERHEAD = 80
+
+/** The word a cut line carries when even one item is past the budget. */
+const BUDGET_MARK = '…（达到显示上限）'
+
+/** What a block of lines costs against the budget: its characters, and the rows
+ * it wraps into, each row a node with props of its own. */
+function costOf(lines: string[], width: number): number {
+  const room = Math.max(1, width)
+
+  return lines.reduce((sum, line) => sum + line.length + Math.max(1, Math.ceil(cellsOf(line) / room)) * ROW_OVERHEAD, 0)
+}
+
+/** The first item, cut to the budget, for a single task or call past the whole page. */
+function clipOne(lines: string[], budget: DetailBudget, width: number): string[] {
+  const out: string[] = []
+  let used = 0
+
+  for (const line of lines) {
+    const remaining = Math.max(0, budget.serial - used)
+    // A character costs one, and every wrapped row costs its own markup too.
+    const room = Math.floor((remaining * Math.max(1, width)) / (Math.max(1, width) + ROW_OVERHEAD)) - BUDGET_MARK.length
+
+    if (room <= 0) {
+      break
+    }
+
+    if (line.length <= room) {
+      out.push(line)
+      used += line.length + Math.max(1, Math.ceil(cellsOf(line) / Math.max(1, width))) * ROW_OVERHEAD
+      continue
+    }
+
+    out.push(`${line.slice(0, room)}${BUDGET_MARK}`)
+    used = budget.serial
+    break
+  }
+
+  return out.length === 0 ? [BUDGET_MARK] : out
+}
+
+/**
+ * As many whole items as fit both budgets, plus how many were left off. A single
+ * item too large for the page is kept, cut, and marked; the caller appends the
+ * "还有 N 项" line from `hidden`.
+ */
+export function takeRows<T>(
+  items: T[],
+  linesOf: (item: T) => string[],
+  budget: DetailBudget = DETAIL_BUDGET,
+  width = 72,
+): { lines: string[]; shown: number; hidden: number } {
+  const lines: string[] = []
+  let serial = 0
+  let rows = 0
+  let shown = 0
+
+  for (const item of items) {
+    const next = linesOf(item)
+    const cost = costOf(next, width)
+
+    if (rows + next.length > budget.rows || serial + cost > budget.serial) {
+      break
+    }
+
+    lines.push(...next)
+    serial += cost
+    rows += next.length
+    shown += 1
+  }
+
+  if (shown === 0 && items.length > 0) {
+    lines.push(...clipOne(linesOf(items[0] as T), budget, width))
+    shown = 1
+  }
+
+  return { lines, shown, hidden: items.length - shown }
+}
+
+/** What the OpenSpec list is narrowed to: one repo, one age, one status, or all of each. */
+export type SpecFilter = { repo: string; since: 'all' | 'today' | '7d' | '30d'; status: Group | 'all' }
 
 /** The filter as a session starts: nothing narrowed. */
-export const NO_FILTER: SpecFilter = { repo: 'all', since: 'all' }
+export const NO_FILTER: SpecFilter = { repo: 'all', since: 'all', status: 'all' }
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -101,9 +205,9 @@ export function filterOf(changes: SpecChange[], filter: SpecFilter, now: number)
 
 /** The rows each tab stands for, the newest first where time orders them; the
  * OpenSpec page is read through the person's filter. */
-export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILTER, now = Date.now()): Item[] {
+export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILTER, now = Date.now(), width = 72): Item[] {
   if (tab === 'openspec') {
-    return changeItems(filterOf(stored.changes, filter, now))
+    return changeItems(filterOf(stored.changes, filter, now), width)
   }
 
   if (tab === 'conversation') {
@@ -111,7 +215,7 @@ export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILT
   }
 
   if (tab === 'mcp') {
-    return callItems(stored.calls)
+    return callItems(stored.calls, width)
   }
 
   // The sound tab is four switches: each row flips one, and none opens a page.
@@ -122,7 +226,7 @@ export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILT
 export type Drill = { title: string; items: Item[]; empty: string }
 
 /** The placeholders the tab's own list puts at the top: the session's numbers. */
-export const STATS_KEYS = { tools: 'stats-tools', commands: 'stats-commands' } as const
+export const STATS_KEYS = { models: 'stats-models', tools: 'stats-tools', commands: 'stats-commands' } as const
 
 /** Every call a tool made this session, newest first, across all rounds. */
 function callsOf(all: Turn[], tool: string): { turn: Turn; note: ToolNote; at: number }[] {
@@ -150,12 +254,12 @@ function firstLineOf(turn: Turn): string {
 
 /** One note as a drill row: its time, how it went, and what it said it ran. */
 function noteItem(id: string, note: ToolNote): Item {
-  const mark = note.isOk ? '✓' : '✗'
+  const result = note.isOk ? '成功' : '失败'
   const took = note.ms >= 0 ? ` ${note.ms}ms` : ''
 
   return {
     id,
-    line: `${timeOf(note.at)} ${mark} ${note.summary}${took}`,
+    line: `${timeOf(note.at)} ${result} ${note.summary}${took}`,
     detailLines: [],
   }
 }
@@ -182,19 +286,17 @@ export function callDetailOf(turns: Turn[], id: string): { title: string; lines:
     return null
   }
 
-  const mark = note.isOk ? '✓' : '✗'
-
   return {
-    title: `${mark} ${note.summary}`,
+    title: note.summary,
     lines: [
       `时间: ${whenOf(note.at)}`,
       `结果: ${note.isOk ? '成功' : '失败'}`,
       `耗时: ${note.ms >= 0 ? `${note.ms}ms` : '—'}`,
       `摘要: ${note.summary}`,
       '',
-      headLineOf('参数', '🔧'),
+      headLineOf('参数'),
       ...(note.detail === '' ? ['（无）'] : note.detail.split('\n')),
-      headLineOf('结果', '📋'),
+      headLineOf('结果'),
       ...(note.result === '' ? ['（无）'] : note.result.split('\n')),
     ],
   }
@@ -209,6 +311,24 @@ export function callDetailOf(turns: Turn[], id: string): { title: string; lines:
 export function drillItemsOf(tab: TabId, stored: Stored, path: string[]): Drill {
   const top = path[path.length - 1] ?? ''
   const turns = stored.turns
+
+  if (top === STATS_KEYS.models) {
+    const stats = statsOf(turns)
+    const rounds = stats.models.reduce((sum, one) => sum + one.turns, 0)
+
+    return {
+      title: `会话 · ${stats.models.length} 个模型 · ${rounds} 轮`,
+      empty: '（暂无用量）',
+      items: [
+        ...stats.models.map(one => ({
+          id: `model:${one.model}`,
+          line: `${one.model}（${one.turns} 轮） ${tokenLine(one)}`,
+          detailLines: [],
+        })),
+        { id: 'model-total', line: `合计 ${tokenLine(stats.total)}`, detailLines: [] },
+      ],
+    }
+  }
 
   if (top === STATS_KEYS.tools) {
     const byName = new Map<string, number>()
@@ -281,25 +401,26 @@ export function drillItemsOf(tab: TabId, stored: Stored, path: string[]): Drill 
   return { title: '（没有这一层）', items: [], empty: '这一层已经不在了，按 b 返回' }
 }
 
+/** A four-field token line as the stats pages read it: K / M, never raw counts. */
+function tokenLine(one: { input: number; output: number; cacheRead: number; cacheWrite: number }): string {
+  return `入 ${kmOf(one.input)} · 出 ${kmOf(one.output)} · 缓存读 ${kmOf(one.cacheRead)} · 缓存写 ${kmOf(one.cacheWrite)}`
+}
+
 /** The session at a glance: the models and what each cost, and the tools it ran. */
 export function statsLines(turns: Turn[]): { models: string[]; tools: string; commands: string } {
   const stats = statsOf(turns)
-  const line = (one: { input: number; output: number; cacheRead: number; cacheWrite: number }) =>
-    `入 ${one.input} · 出 ${one.output} · 缓存读 ${one.cacheRead} · 缓存写 ${one.cacheWrite}`
 
   return {
     models:
       stats.models.length === 0
         ? ['（暂无用量）']
-        : [...stats.models.map(one => `${one.model}（${one.turns} 轮） ${line(one)}`), `合计 ${line(stats.total)}`],
+        : [...stats.models.map(one => `${one.model}（${one.turns} 轮） ${tokenLine(one)}`), `合计 ${tokenLine(stats.total)}`],
     tools: `工具 ${stats.toolKinds} 种 · ${stats.toolCalls} 次`,
     commands: `命令 ${stats.commandCalls} 次`,
   }
 }
 
-function changeItems(all: SpecChange[]): Item[] {
-  const newest = all.reduce((top, one) => Math.max(top, one.mtime), 0)
-
+function changeItems(all: SpecChange[], width: number): Item[] {
   return all
     .slice()
     .sort((a, b) => GROUP_ORDER.indexOf(groupOf(a)) - GROUP_ORDER.indexOf(groupOf(b)) || b.mtime - a.mtime)
@@ -307,46 +428,53 @@ function changeItems(all: SpecChange[]): Item[] {
       const group = groupOf(one)
       const left = one.hasTasks ? one.total - one.done : 0
       const age = agoOf(one.mtime)
-      // Fixed columns, so a glance down the list compares like with like: progress
-      // first (its right edge is one line), then the age, the repo, and the name
-      // taking whatever is left.
-      const nameRoom = Math.max(8, 80 - COL.done - COL.age - COL.repo - COL.gap * 3)
-      const line = [
-        padLeft(one.hasTasks ? `${one.done}/${one.total}` : '-/-', COL.done),
-        ' '.repeat(COL.gap),
-        ageColOf(age, COL.age),
-        ' '.repeat(COL.gap),
-        padCells(midClip(one.repo, COL.repo), COL.repo),
-        ' '.repeat(COL.gap),
-        endClip(one.name, nameRoom),
-      ].join('')
+      const done = one.hasTasks ? `${one.done}/${one.total}` : '—'
+      const tag = STATUS_TAG[group].short
+      const tone = STATUS_TAG[group].tone
+      const line = `${tag}  ${done}  ${age}  ${one.repo}  ${one.name}`
+
+      const fields = [
+        one.name,
+        `仓库: ${one.repo}`,
+        `状态: ${GROUP_LABEL[group]}`,
+        one.hasTasks ? `任务: ${one.done}/${one.total}${left > 0 ? `（欠 ${left} 项）` : ''}` : '任务: 无 tasks.md',
+        one.needNo !== '' ? `需求号: ${one.needNo}` : `需求号: （proposal.md 未写）`,
+        `开发: ${one.authors.join('、') || '未配置'}`,
+        `文件: ${one.files.join(', ') || '（空）'}`,
+        `修改: ${whenOf(one.mtime)}（${age}前）`,
+        one.isArchived ? `归档于: ${one.archivedOn !== '' ? one.archivedOn : '（目录名无日期）'}` : '',
+      ].filter(line => line !== '')
 
       return {
         id: `${one.repo}/${one.name}`,
         group,
-        isWarn: group === 'broken',
-        isNewest: newest === one.mtime,
+        tag,
+        tone,
+        done,
+        age,
+        repo: one.repo,
+        name: one.name,
         line,
-        detailLines: [
-          one.name,
-          `仓库: ${one.repo}`,
-          `状态: ${GROUP_LABEL[group]}`,
-          one.hasTasks ? `任务: ${one.done}/${one.total}${left > 0 ? `（欠 ${left} 项）` : ''}` : '任务: 无 tasks.md',
-          one.needNo !== '' ? `需求号: ${one.needNo}` : '需求号: （proposal.md 未写）',
-          `开发: ${one.authors.join('、') || '未配置'}`,
-          `文件: ${one.files.join(', ') || '（空）'}`,
-          `修改: ${whenOf(one.mtime)}（${age}前）`,
-          one.isArchived ? `归档于: ${one.archivedOn !== '' ? one.archivedOn : '（目录名无日期）'}` : '',
-          // What is left, in tasks.md's own words: "欠 3 项" says how many, not what.
-          one.open.length === 0 ? '' : `未完成 ${one.open.length} 项：`,
-          ...one.open.slice(0, 12).map((task, at) => `  ${at + 1}. ${task.slice(0, 160)}${task.length > 160 ? '…' : ''}`),
-          one.open.length > 12 ? `  … 还有 ${one.open.length - 12} 项` : '',
-        ].filter(one => one !== ''),
+        // The task body is built only when the person opens this detail: a list of
+        // changes should not pay for every change's tasks on each redraw.
+        get detailLines(): string[] {
+          const numbered = one.open.map((task, at) => ({ task, at }))
+          const taken = takeRows(numbered, ({ task, at }) => [`  ${at + 1}. ${task}`], DETAIL_BUDGET, width)
+          const taskLines = one.open.length === 0
+            ? []
+            : [
+                `未完成 ${one.open.length} 项：`,
+                ...taken.lines,
+                ...(taken.hidden > 0 ? [`  … 还有 ${taken.hidden} 项未显示（达到显示上限）`] : []),
+              ]
+
+          return [...fields, ...taskLines].filter(one => one !== '')
+        },
       }
     })
 }
 
-function callItems(all: Call[]): Item[] {
+function callItems(all: Call[], width: number): Item[] {
   const byServer = new Map<string, Call[]>()
 
   for (const one of all) {
@@ -355,25 +483,30 @@ function callItems(all: Call[]): Item[] {
 
   return [...byServer.entries()].map(([server, group]) => {
     const last = group[group.length - 1]
+    const head = [`${server}（${group.length} 次）`, '']
+    const tag = server === 'local' ? '本地' : 'MCP'
 
     return {
       id: `mcp:${server}`,
-      line: `${server}  ${group.length} 次${last === undefined ? '' : ` · 最近 ${timeOf(last.at)}`}`,
-      detailLines: [
-        `${server}（${group.length} 次）`,
-        '',
-        ...group
-          .slice()
-          .reverse()
-          .slice(0, 40)
-          .flatMap(one => [
-            `${timeOf(one.at)} ${one.isOk ? '✓' : '✗'} ${one.name} ${one.ms >= 0 ? `${one.ms}ms` : '…'}`,
-            ...one.detail
-              .split('\n')
-              .slice(0, 8)
-              .map(line => `  ${line}`),
-          ]),
-      ],
+      tag,
+      tone: 'subtle' as const,
+      count: group.length,
+      name: server,
+      last: last === undefined ? '—' : timeOf(last.at),
+      line: `${tag}  ${server}  ${group.length} 次${last === undefined ? '' : ` · 最近 ${timeOf(last.at)}`}`,
+      // The calls' bodies are built only when this server's detail is opened.
+      get detailLines(): string[] {
+        const taken = takeRows(group.slice().reverse(), one => [
+          `${timeOf(one.at)} ${one.isOk ? '成功' : '失败'} ${one.name} ${one.ms >= 0 ? `${one.ms}ms` : '…'}`,
+          ...one.detail.split('\n').map(line => `  ${line}`),
+        ], DETAIL_BUDGET, width)
+
+        return [
+          ...head,
+          ...taken.lines,
+          ...(taken.hidden > 0 ? [`  … 还有 ${taken.hidden} 次调用未显示（达到显示上限）`] : []),
+        ]
+      },
     }
   })
 }
@@ -388,13 +521,20 @@ export const SOUNDS: { key: keyof SoundSettings; label: string }[] = [
 ]
 
 function soundItems(settings: SoundSettings): Item[] {
-  return SOUNDS.map(({ key, label }) => ({
-    id: `sound-${key}`,
-    // A row is its own switch: pressing it flips it, so it has no detail to open.
-    line: `${settings[key] ? '🔊 [开]' : '🔇 [关]'} ${label}`,
-    detailLines: [],
-    sound: key,
-  }))
+  return SOUNDS.map(({ key, label }) => {
+    const on = settings[key]
+
+    return {
+      id: `sound-${key}`,
+      // A row is its own switch: pressing it flips it, so it has no detail to open.
+      tag: on ? '开' : '关',
+      tone: on ? ('success' as const) : ('subtle' as const),
+      name: label,
+      line: `${on ? '开' : '关'}  ${label}`,
+      detailLines: [],
+      sound: key,
+    }
+  })
 }
 
 /** The rounds of conversation, the newest first, each on one line. */
@@ -404,26 +544,32 @@ function conversationItems(turns: Turn[]): Item[] {
     .reverse()
     .map(one => {
       const first = one.text.split('\n').find(line => line.trim() !== '')?.trim() ?? ''
+      const { tag, tone } = tagOfTurn(one)
 
       return {
         id: one.id,
-        // The mark says who opened the round; the colour says how it went.
-        line: `${timeOf(one.at)} ${first}`,
-        mark: markOfTurn(one),
-        isWarn: isTroubled(one),
+        tag,
+        tone,
+        time: timeOf(one.at),
+        summary: first,
+        line: `${tag}  ${timeOf(one.at)}  ${first}`,
         detailLines: [],
         sections: turnSections(one),
       }
     })
 }
 
-/** `◆` a question the model asked, `↻` a turn the person did not type, `·` their words. */
-function markOfTurn(turn: Turn): string {
-  if (turn.kind === 'ask') {
-    return '◆'
+/** What opened a round, and how it went; a failure takes the tag. */
+function tagOfTurn(turn: Turn): { tag: string; tone: Tone } {
+  if (isTroubled(turn)) {
+    return { tag: '异常', tone: 'error' }
   }
 
-  return turn.kind === 'continuation' ? '↻' : '·'
+  if (turn.kind === 'ask') {
+    return { tag: '提问', tone: 'warning' }
+  }
+
+  return turn.kind === 'continuation' ? { tag: '续轮', tone: 'subtle' } : { tag: '输入', tone: 'claude' }
 }
 
 /** What the turn said of itself on the list, in the words a person reads. */
@@ -473,13 +619,13 @@ function turnSections(turn: Turn): { lead: string[]; sections: DetailSection[]; 
  * name each tool, so a tool name opens its calls without moving the line. */
 export const TOOLS_ROW = '\u0000tools'
 
-/** The heading that opens a section of the tail: its name and the emoji that says
- * which kind of thing it holds. The drawer finds it by this prefix. */
+/** The heading that opens a section of the tail: its name. The drawer finds it
+ * by this prefix. */
 export const SECTION_HEAD = '\u0000head:'
 
 /** A tail section's heading line, by the section it opens. */
-export function headLineOf(title: string, icon: string): string {
-  return `${SECTION_HEAD}${icon} ${title}`
+export function headLineOf(title: string): string {
+  return `${SECTION_HEAD}${title}`
 }
 
 /** What stays visible under the bodies: the tools, the cost, and how it ended. */
@@ -492,38 +638,15 @@ function turnTail(turn: Turn): string[] {
       ? `用量: —（未计数）`
       : `用量: 入 ${turn.usage.input} · 出 ${turn.usage.output} · 缓存读 ${turn.usage.cacheRead} · 缓存写 ${turn.usage.cacheWrite}`
   return [
-    headLineOf('工具', '🔧'),
+    headLineOf('工具'),
     tools === '' ? '（本轮没有调用工具）' : tools,
     TOOLS_ROW,
-    headLineOf('用量', '🎫'),
+    headLineOf('用量'),
     `耗时: ${turn.durationMs === undefined ? '—' : spanOf(turn.durationMs)}`,
     cost,
     `模型: ${turn.usage?.model ?? '—'}`,
     `结束: ${turn.endReason === undefined ? (turn.isOpen ? '进行中' : '—') : REASON_LABEL[turn.endReason]}`,
   ].filter(one => one !== '')
-}
-
-/** Every change, less the rows of a stretch the person folded, but never less than
- * that stretch's first change: its heading is drawn above it, and a heading without
- * a row to stand on would fold the stretch away for good. */
-export function withHeadingsOf(all: Item[], closed: Group[]): Item[] {
-  const seen = new Set<Group>()
-
-  return all.filter(one => {
-    const group = one.group
-
-    if (group === undefined || !closed.includes(group)) {
-      return true
-    }
-
-    if (seen.has(group)) {
-      return false
-    }
-
-    seen.add(group)
-
-    return true
-  })
 }
 
 /** How many changes each stretch holds. */

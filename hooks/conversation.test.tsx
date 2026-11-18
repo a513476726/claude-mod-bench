@@ -21,6 +21,17 @@ test('a typed prompt opens a round with its words in full', () => {
   expect(list[0]?.isOpen).toBe(true)
 })
 
+test('a long input and answer stop at the store cap with a reason', () => {
+  const long = 'x'.repeat(25_000)
+  const open = startTurn([], { id: 't1', kind: 'input', at, text: long })
+  const list = closeTurn(open, 't1', { reason: 'answer', durationMs: 1, answer: long })
+
+  expect(list[0]?.text.length).toBeLessThanOrEqual(20_000)
+  expect(list[0]?.text).toContain('已达存储上限 20,000 字')
+  expect(list[0]?.answer.length).toBeLessThanOrEqual(20_000)
+  expect(list[0]?.answer).toContain('已达存储上限 20,000 字')
+})
+
 test('a second prompt closes the round before it', () => {
   const first = startTurn([], { id: 't1', kind: 'input', at, text: '一' })
   const list = startTurn(first, { id: 't2', kind: 'input', at: at + 1, text: '二' })
@@ -259,7 +270,7 @@ test('the oldest round falls off once the cap is reached', () => {
   expect(list.some(one => one.text === '最早的一轮')).toBe(false)
 })
 
-test('a question leads its row with a diamond, a typed turn with a dot', async ($, on) => {
+test('a question and a typed turn lead their rows with their own tags', async ($, on) => {
   quiet(on)
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('tool.call', () => ({ result: {} }))
@@ -273,8 +284,8 @@ test('a question leads its row with a diamond, a typed turn with a dot', async (
 
   const texts = ((await ui.findAll({ type: 'Text' })) as { text?: string }[]).map(one => String(one.text ?? '')).join('\n')
 
-  expect(texts).toContain('◆')
-  expect(texts).toContain('·')
+  expect(texts).toContain('提问')
+  expect(texts).toContain('输入')
   expect(texts).toContain('要不要改？')
 
   await ui.unmount()

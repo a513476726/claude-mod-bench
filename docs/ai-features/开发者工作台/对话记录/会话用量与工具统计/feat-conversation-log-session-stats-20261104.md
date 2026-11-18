@@ -6,7 +6,7 @@ feature: session-stats
 owner: 待确认
 last_editor: AI
 updated: 2026-11-06
-status: draft
+status: archived
 tests: docs/ai-feature-tests/开发者工作台/对话记录/会话用量与工具统计/feat-conversation-log-session-stats-20261104.md
 ---
 

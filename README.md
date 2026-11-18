@@ -8,12 +8,12 @@ Claude Code 的开发者工作台：一块常驻面板，把 OpenSpec 进度、�
 
 | 页签 | 内容 |
 |---|---|
-| **OpenSpec** | 扫描工作区各仓库的 `openspec/changes/`，按状态分成五段：进行中 / 待归档 / 归档异常 / 已归档 / 无任务清单。逐条显示任务进度、仓库、修改时间 |
+| **OpenSpec** | 扫描工作区各仓库的 `openspec/changes/`，平铺成一行一条。第一列是状态标签（进行 / 待办 / 异常 / 完成 / 无单），顶部状态轨道可筛选；逐条显示任务进度、仓库、修改时间 |
 | **对话** | 本会话每一轮对话一行：你的输入或 AI 的提问、耗时、token、用了哪些工具、结束原因、AI 的回答。点开看详情，长输入与长回答按屏幕折叠，可单独展开看全文 |
 | **MCP** | 按 MCP 服务器分组，看每次调用了什么工具、传了什么参数、成功还是失败 |
 | **提示音** | 会话状态的声音提示：需要决策 / 任务完成 / 任务异常 |
 
-除页签外，面板底部常驻一行分支状态，未提交改动的分支显示为黄色，可点开预览 `git diff`。
+除页签外，面板底部常驻一条分支轨道，未提交改动的分支显示为黄色，可点开预览 `git diff`。界面采用方向 D：状态是第一列，结构只靠整宽规则线与缩进，不用卡片与 emoji。
 
 ## 安装
 
@@ -65,6 +65,10 @@ claude --plugin-dir /path/to/claude-mod-bench
 本项目用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 管理变更：每个改动先 `/opsx:propose` 产出规划，再 `/opsx:apply` 实施，验证通过后 `/opsx:archive` 归档。
 
 实施阶段按 [三角色协作标准](docs/SKILL.md) 进行：架构师定结构与质量闸门，UI 交互设计师定界面与交互细则，功能开发工程师按两者约束实施。界面规范见 [UI-SPEC.md](docs/UI-SPEC.md)。
+
+apply 阶段以 superpowers 执行：`executing-plans`（tasks.md 为计划）→ `test-driven-development`（每个行为任务先失败测试）→ `systematic-debugging`（失败排查）→ `verification-before-completion`（三项验证实际输出）→ `requesting-code-review` → `finishing-a-development-branch`。完整协议见 [`.claude/skills/openspec-apply-superpowers/SKILL.md`](.claude/skills/openspec-apply-superpowers/SKILL.md)。
+
+UI 任务另有设计前置门：先调用 `frontend-design` skill，按 `docs/UI-SPEC.md` 与 `bench-ui` 出设计计划、补齐规范缺口，再改 UI 代码；未过门不得实施。
 
 交付前三项验证缺一不可：
 

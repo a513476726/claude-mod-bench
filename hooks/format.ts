@@ -29,6 +29,47 @@ export function padCells(text: string, width: number): string {
   return text + ' '.repeat(Math.max(0, width - cellsOf(text)))
 }
 
+/**
+ * A token count in the unit a dashboard reads: `850`, `120K`, `1.2M`. Floored, so a
+ * reading never claims more than was spent; a count under a thousand keeps its own
+ * digits, because `0K` would be a lie about a small number.
+ */
+export function kmOf(tokens: number): string {
+  const value = Number.isFinite(tokens) ? Math.max(0, Math.floor(tokens)) : 0
+
+  if (value < 1000) {
+    return String(value)
+  }
+
+  if (value < 1_000_000) {
+    return `${Math.floor(value / 1000)}K`
+  }
+
+  return `${(Math.floor(value / 100_000) / 10).toFixed(1)}M`
+}
+
+/**
+ * The live context window as the rail and the band say it: the fill of the last
+ * response against the model's own window, floored to a whole percent, and the
+ * tone that fill earns — quiet under 70, `warning` from 70, `error` from 90.
+ *
+ * A window with no reading says `—`, never `0%`: an unmeasured window is not an
+ * empty one.
+ */
+export function ctxOf(
+  tokens: number | undefined,
+  window: number,
+): { text: string; tone: 'subtle' | 'warning' | 'error' } {
+  if (tokens === undefined || !Number.isFinite(tokens) || !Number.isFinite(window) || window <= 0) {
+    return { text: '—', tone: 'subtle' }
+  }
+
+  const percent = Math.max(0, Math.floor((tokens * 100) / window))
+  const tone = percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'subtle'
+
+  return { text: `${percent}%`, tone }
+}
+
 export function padLeft(text: string, width: number): string {
   return ' '.repeat(Math.max(0, width - cellsOf(text))) + text
 }
@@ -219,6 +260,141 @@ export function msOf(iso: string): number {
  */
 export function rowsOf(line: string, columns: number): number {
   return Math.max(1, Math.ceil(cellsOf(line) / Math.max(1, columns)))
+}
+
+/**
+ * A line wrapped to `room` cells without losing a character: whole words where
+ * they fit, a hard cut where a word is longer than a row, and the leading
+ * whitespace of the source kept. Continuation rows carry `restIndent` spaces, so
+ * a title's second row lines up under its first; `room` is the content width,
+ * the indent not counted in it.
+ *
+ * Unlike `wrapCells`, this never merges runs of spaces and never trims a code
+ * line: the full-text view must draw exactly what was stored.
+ */
+export function wrapKeep(line: string, room: number, restIndent = 0): string[] {
+  const width = Math.max(1, room)
+
+  if (line === '') {
+    return ['']
+  }
+
+  const out: string[] = []
+  let rest = line
+  let isFirst = true
+
+  while (cellsOf(rest) > width) {
+    let cut = 0
+    let cells = 0
+    let lastSpace = -1
+    let hasContent = false
+
+    for (const char of rest) {
+      const next = cellsOf(char)
+
+      if (cells + next > width) {
+        break
+      }
+
+      cells += next
+      cut += char.length
+
+      if (char !== ' ') {
+        hasContent = true
+      } else if (hasContent) {
+        lastSpace = cut
+      }
+    }
+
+    const at = lastSpace > 0 ? lastSpace : Math.max(1, cut)
+    const row = rest.slice(0, at)
+
+    out.push(isFirst ? row : `${' '.repeat(restIndent)}${row}`)
+    rest = rest.slice(at)
+    isFirst = false
+  }
+
+  out.push(isFirst ? rest : `${' '.repeat(restIndent)}${rest}`)
+
+  return out
+}
+
+/** Thousands grouped with commas, independent of the runtime locale. */
+function groupDigits(value: number): string {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+/** The one line a stored value carries when it stops at its cap. */
+/**
+ * A name wrapped at its hyphens where it has them, and hard-wrapped where a
+ * chunk is still too long. Used for titles and change names: a mid-word cut at
+ * an arbitrary cell reads worse than a cut at `-`.
+ */
+export function wrapName(text: string, width: number): string[] {
+  const room = Math.max(1, width)
+
+  if (cellsOf(text) <= room) {
+    return [text]
+  }
+
+  const chunks: string[] = []
+  let chunk = ''
+
+  for (const char of text) {
+    chunk += char
+
+    if (char === '-') {
+      chunks.push(chunk)
+      chunk = ''
+    }
+  }
+
+  if (chunk !== '') {
+    chunks.push(chunk)
+  }
+
+  if (chunks.length <= 1) {
+    return wrapKeep(text, room)
+  }
+
+  const rows: string[] = []
+  let row = ''
+
+  for (const one of chunks) {
+    if (row === '') {
+      row = one
+    } else if (cellsOf(row + one) <= room) {
+      row += one
+    } else {
+      rows.push(row)
+      row = one
+    }
+  }
+
+  if (row !== '') {
+    rows.push(row)
+  }
+
+  return rows.flatMap(one => (cellsOf(one) <= room ? [one] : wrapKeep(one, room)))
+}
+
+export function capMark(max: number): string {
+  return `…（已达存储上限 ${groupDigits(max)} 字）`
+}
+
+/**
+ * A value cut where its cap stops reading. The marker is counted in the cap, so
+ * the stored string never grows past `max`; `isBlock` puts it on a new line, and
+ * a one-line value (a summary) keeps it inline.
+ */
+export function capText(text: string, max: number, mark: string, isBlock = true): string {
+  if (text.length <= max) {
+    return text
+  }
+
+  const suffix = `${isBlock ? '\n' : ' '}${mark}`
+
+  return `${text.slice(0, Math.max(0, max - suffix.length))}${suffix}`
 }
 
 /** Lines kept, and the rows they take: the first `budget` rows of `lines`. */

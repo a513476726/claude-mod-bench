@@ -14,8 +14,9 @@ import {
   type InputSeen,
 } from './conversation'
 import { editorOf, editFile, openDiff, openFile, readTextOf, rootOf, type DiffShown, type FileShown } from './files'
+import { capMark, capText, cellsOf, ctxOf } from './format'
 import { NO_FILTER } from './items'
-import { drawPane, nameOf, play, serverOf, type PaneState } from './panes'
+import { drawPane, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState } from './panes'
 import { branchesOf, rememberStartCwd, scan, type ScanOutcome } from './scan'
 
 const PANE = 'bench'
@@ -33,22 +34,21 @@ const BRANCH_POLL_MS = 5_000
  * without ending a turn first. */
 const SPEC_POLL_MS = 5_000
 
-/** The tab on show, the row the ring is on, and whether that row is open: only
- * the stretch being worked on stands open at first, the rest wait behind their
- * headings, with their counts, until the person asks. */
+/** The page the person is on: the tab, the row the ring is on, and whether that
+ * row is open. The status, repo and age filters sit on the view so they survive a
+ * redraw; the branch rail's own open state sits here too. */
 const view = atom(
   { plugin: 'bench', key: 'view' } as const,
   {
     tab: 'openspec',
     index: 0,
     isDetail: false,
-    closed: ['ready', 'broken', 'archived', 'bare'],
     fullSection: null,
     path: [],
     filter: NO_FILTER,
     isBranchOpen: false,
   } as PaneState,
-  { shape: 'view-6' },
+  { shape: 'view-7' },
 )
 
 const changes = atom({ plugin: 'bench', key: 'changes' } as const, [] as SpecChange[], { shape: 'changes-1' })
@@ -67,8 +67,58 @@ const sounds = atom(
   { shape: 'sounds-2' },
 )
 const branches = atom({ plugin: 'bench', key: 'branches' } as const, [] as Branch[], { shape: 'branches-1' })
+/** The live context window's fill: the engine's own measurement, pushed after a
+ * turn and read once at the start. The pane and the band only read this; nothing
+ * here derives it from turn usage, which the engine reports summed. */
+const ctx = atom({ plugin: 'bench', key: 'ctx' } as const, { window: 0 } as ContextFill, { shape: 'ctx-1' })
 const diff = atom({ plugin: 'bench', key: 'diff' } as const, null as DiffShown | null, { shape: 'diff-3' })
 const file = atom({ plugin: 'bench', key: 'file' } as const, null as FileShown | null, { shape: 'file-2' })
+/** What the engine last said about the pane's window: how tall the tree was, on
+ * which page. A page change clears it, so an old height never marks a new page. */
+const scrollInfo = atom(
+  { plugin: 'bench', key: 'scrollInfo' } as const,
+  { contentRows: 0, page: '' },
+  { shape: 'scroll-1' },
+)
+
+/** One page change: the values it replaces, and the window it returns to the top. */
+type PageMove = { view?: PaneState; diff?: DiffShown | null; file?: FileShown | null }
+
+/**
+ * A page change writes its values, clears the old window height, and puts the
+ * pane back at the first row. In-page changes (folding, filtering, opening the
+ * branch card) keep `setView` and leave the window alone.
+ */
+async function navigate($: EngineInterface, next: PageMove): Promise<void> {
+  if (next.file !== undefined) {
+    await update($, file, () => next.file ?? null)
+  }
+
+  if (next.diff !== undefined) {
+    await update($, diff, () => next.diff ?? null)
+  }
+
+  if (next.view !== undefined) {
+    await update($, view, () => next.view as PaneState)
+  }
+
+  // Move the window first, then drop the old height: a scroll raised during the
+  // move sees the new page but the old tree, and must not be kept as its height.
+  await $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
+  await update($, scrollInfo, () => ({ contentRows: 0, page: '' }))
+}
+
+/** A view-only page change: the common case for details, drills and tabs. */
+async function navigateView($: EngineInterface, nextView: PaneState): Promise<void> {
+  await navigate($, { view: nextView })
+}
+
+/** A full-body page, opened or closed; the view under it stays as it was. */
+async function navigateSection($: EngineInterface, section: 'input' | 'answer' | null): Promise<void> {
+  const current = (await read($, view)) as PaneState
+
+  await navigate($, { view: { ...current, fullSection: section } })
+}
 
 /**
  * One event, one sound: the switches are read at the moment it happens, so a flip
@@ -139,12 +189,42 @@ function startPolling($: EngineInterface): void {
   pollTickets.push($.clock.every(SPEC_POLL_MS, () => void refresh($, false)))
 }
 
+/** Keeps only what the reading is: the model's window and its fill. A reading that
+ * did not move writes nothing, so no reader redraws for it. */
+async function rememberCtx($: EngineInterface, context: ContextFill): Promise<void> {
+  const before = await read($, ctx)
+
+  if (before.window === context.window && before.tokens === context.tokens) {
+    return
+  }
+
+  await update($, ctx, () =>
+    context.tokens === undefined ? { window: context.window } : { tokens: context.tokens, window: context.window },
+  )
+}
+
+/** One read of the engine's own figures; a host that cannot answer keeps the last one. */
+async function refreshCtx($: EngineInterface): Promise<void> {
+  let usage: { context: ContextFill } | null = null
+
+  try {
+    usage = await $.session.usage()
+  } catch {
+    usage = null
+  }
+
+  if (usage !== null) {
+    await rememberCtx($, usage.context)
+  }
+}
+
 export const register: Register = (on, options) => {
   // ------------------------------------------------------------- spec progress
 
   on('session.start', async ($, e, next) => {
     rememberStartCwd(String(e.cwd ?? ''))
     await $.command.register({ name: 'panel', description: TITLE })
+    await refreshCtx($)
 
     // The engine itself says why a pane waits: a floor it fell under, or a surface
     // that places none. Guessing at the width hid the real cause once already.
@@ -162,6 +242,14 @@ export const register: Register = (on, options) => {
 
     await refresh($)
     startPolling($)
+
+    return next(e)
+  })
+
+  // The engine's own measurement: the only push the context window has. A turn's
+  // usage is summed across its requests, so it is never read as the window's fill.
+  on('session.measure', async ($, e, next) => {
+    await rememberCtx($, e.context)
 
     return next(e)
   })
@@ -209,6 +297,10 @@ export const register: Register = (on, options) => {
         return open === undefined ? list : closeTurn(list, open.id, end)
       })
     }
+
+    // The measurement normally lands on its own; a host that omits it (or races
+    // the turn) still gets the fresh figures here.
+    await refreshCtx($)
 
     return next(e)
   })
@@ -258,7 +350,7 @@ export const register: Register = (on, options) => {
       name: nameOf(wire),
       at: callStartedAt,
       ms: -1,
-      detail: (detail ?? '').length > 20_000 ? `${(detail ?? '').slice(0, 20_000)}\n…` : (detail ?? ''),
+      detail: capText(detail ?? '', 20_000, capMark(20_000)),
       summary: `${serverOf(e)} · ${nameOf(wire)}`,
       isOk: true,
       result: '',
@@ -272,7 +364,7 @@ export const register: Register = (on, options) => {
 
     await update($, calls, list =>
       list.map(one =>
-        one.id === call.id ? { ...one, ms: callFinishedAt - callStartedAt, isOk, result: text.slice(0, 4_000) } : one,
+        one.id === call.id ? { ...one, ms: callFinishedAt - callStartedAt, isOk, result: capText(text, 4_000, capMark(4_000)) } : one,
       ),
     )
 
@@ -352,6 +444,19 @@ export const register: Register = (on, options) => {
     const doing = list.filter(one => one.hasTasks && one.done < one.total && !one.isArchived).length
     const broken = list.filter(one => one.hasTasks && one.done < one.total && one.isArchived).length
     const room = Math.max(20, e.props.bodyColumns ?? 80)
+    const live = await read($, ctx)
+    const reading = ctxOf(live.tokens, live.window)
+
+    // The band's one job at the right edge is the context reading: counts step
+    // aside for it, and it steps aside only when the head alone fills the row.
+    const head = ` OpenSpec ${done}/${total}${doing > 0 ? ` ◉${doing}` : ''}${broken > 0 ? ` !${broken}` : ''}`
+    const budget = room - 9
+    const counts = `  | MCP ${logged.length} | 对话 ${rounds.length}`
+    const talk = `  | 对话 ${rounds.length}`
+    const ctxPart = `  | CTX ${reading.text}`
+    const isFull = cellsOf(head) + cellsOf(counts + ctxPart) <= budget
+    const isTalk = !isFull && cellsOf(head) + cellsOf(talk + ctxPart) <= budget
+    const isCtx = !isFull && !isTalk && cellsOf(head) + cellsOf(ctxPart) <= budget
 
     // The narrow terminal's door: this line is what the pane would say, cut to fit.
     // Every part of it is a plain child of the one Text, never a fragment: the JSX
@@ -365,7 +470,9 @@ export const register: Register = (on, options) => {
           <Text color="success">{`${done}/${total}`}</Text>
           {doing > 0 ? <Text color="claude">{` ◉${doing}`}</Text> : null}
           {broken > 0 ? <Text color="error">{` !${broken}`}</Text> : null}
-          {room > 60 ? <Text dimColor>{`  | MCP ${logged.length} | 对话 ${rounds.length}`}</Text> : null}
+          {isFull ? <Text dimColor>{counts}</Text> : null}
+          {isTalk ? <Text dimColor>{talk}</Text> : null}
+          {isFull || isTalk || isCtx ? <Text color={reading.tone}>{ctxPart}</Text> : null}
         </Text>
       </Box>
     )
@@ -387,12 +494,16 @@ export const register: Register = (on, options) => {
           sounds: await read($, sounds),
         },
         scanState: await read($, scanState),
+        ctx: await read($, ctx),
         branches: await read($, branches),
         diff: await read($, diff),
         file: await read($, file),
+        scroll: await read($, scrollInfo),
       }
       const actions = {
         setView: (next: PaneState) => update($, view, () => next).then(() => undefined),
+        navigate: (next: PaneState) => navigateView($, next),
+        navigateTab: (next: PaneState) => navigate($, { view: next, diff: null, file: null }),
         toggleSound: async (key: keyof SoundSettings) => {
           await update($, sounds, prev => ({ ...prev, [key]: !prev[key] }))
         },
@@ -401,16 +512,15 @@ export const register: Register = (on, options) => {
         previewSound: async (key: keyof SoundSettings) => {
           await notify($, key === 'isOn' ? 'done' : key)
         },
-        closeFile: () => update($, file, () => null).then(() => undefined),
-        closeDiff: () => update($, diff, () => null).then(() => undefined),
-        showSection: (section: 'input' | 'answer' | null) =>
-          update($, view, prev => ({ ...prev, fullSection: section })).then(() => undefined),
-        showFile: (repo: string, rel: string) => openFile($, repo, rel, value => update($, file, () => value).then(() => undefined)),
+        closeFile: () => navigate($, { file: null }),
+        closeDiff: () => navigate($, { diff: null }),
+        showSection: (section: 'input' | 'answer' | null) => navigateSection($, section),
+        showFile: (repo: string, rel: string) => openFile($, repo, rel, value => navigate($, { file: value })),
         openDiff: (repo: string) =>
           openDiff(
             $,
             repo,
-            value => update($, diff, () => value).then(() => undefined),
+            value => navigate($, { diff: value }),
             async rel => {
               const root = await rootOf($, repo)
 
@@ -420,7 +530,7 @@ export const register: Register = (on, options) => {
             },
           ),
         editFile: (repo: string, rel: string) =>
-          editFile($, repo, rel, editorOf(options), value => update($, file, () => value).then(() => undefined)),
+          editFile($, repo, rel, editorOf(options), value => navigate($, { file: value })),
       }
 
       return await drawPane($, e, data, actions, options)
@@ -435,14 +545,32 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // The engine's window over the pane's tree: record its height for the position
+  // hint. A failed write must never stop the scroll itself.
+  on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    try {
+      const state = (await read($, view)) as PaneState
+      const page = pageKeyOf(state, await read($, diff), await read($, file))
+      const before = await read($, scrollInfo)
+
+      if (before.contentRows !== e.contentRows || before.page !== page) {
+        await update($, scrollInfo, () => ({ contentRows: e.contentRows, page }))
+      }
+    } catch (thrown) {
+      $.ui.log(`bench: 滚动信息未记录 — ${String(thrown instanceof Error ? thrown.message : thrown)}`)
+    }
+
+    return next(e)
+  })
+
   // A press on a row while its detail shows returns to the list: the detail
   // draws no row of its own, so this reads the state, not the element.
   on('ui.press', { plugin: 'bench' }, async ($, e, next) => {
-    const state = await read($, view)
+    const state = (await read($, view)) as PaneState
 
     // One body shown whole: `b` (or its own door) steps back to the detail first.
     if (state.fullSection !== null && e.element === 'back') {
-      await update($, view, () => ({ ...state, fullSection: null }))
+      await navigate($, { view: { ...state, fullSection: null } })
 
       return next(e)
     }
@@ -451,7 +579,7 @@ export const register: Register = (on, options) => {
     if (e.element === 'full-input' || e.element === 'full-answer') {
       const section: 'input' | 'answer' = e.element === 'full-input' ? 'input' : 'answer'
 
-      await update($, view, () => ({ ...state, fullSection: section }))
+      await navigate($, { view: { ...state, fullSection: section } })
 
       return next(e)
     }
@@ -464,14 +592,14 @@ export const register: Register = (on, options) => {
         fullSection: (e.element === 'file-tab-file' ? 'file' : null) as PaneState['fullSection'],
       } as PaneState
 
-      await update($, view, () => shown)
+      await navigate($, { view: shown })
 
       return next(e)
     }
 
     // A file's diff steps back to its list, which is where the diff is closed.
     if (state.isDetail && e.element === 'diff-close') {
-      await update($, view, () => ({ ...state, isDetail: false, index: 0, path: [], fullSection: null }))
+      await navigate($, { view: { ...state, isDetail: false, index: 0, path: [], fullSection: null } })
 
       return next(e)
     }
@@ -480,7 +608,7 @@ export const register: Register = (on, options) => {
       state.isDetail &&
       (e.element.startsWith('row-') || e.element === 'back' || e.element.startsWith('file-row-'))
     ) {
-      await update($, view, () => ({ ...state, isDetail: false, fullSection: null, path: [], index: 0 }))
+      await navigate($, { view: { ...state, isDetail: false, fullSection: null, path: [], index: 0 } })
     }
 
     return next(e)

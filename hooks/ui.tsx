@@ -1,33 +1,31 @@
 /**
- * The shapes every page is built from: the page frame, a region card, the three
- * pieces a card is organised with, and the one row every list shares.
- *
- * Nothing here reads the store. Every function takes the engine's element table
- * and plain numbers, so a page is a composition of these and no page decides for
- * itself what a border, a gap or a colour is.
+ * The shapes every page is built from in direction D: the three spaces, the
+ * greys, the status tag table, the full-width rule, the flat row, the footer
+ * and the page title. No page decides for itself what a rule, a gap, a tag or
+ * a colour is.
  */
 
 import type { RenderElement } from 'claude-code'
 
-import { cellsOf, endClip, padCells } from './format'
+import { cellsOf, endClip, padCells, wrapName } from './format'
+import type { Group } from './scan'
 
 /** The engine's element table for one surface. */
 export type Kit = Record<'Box' | 'Text' | 'Button', (props: Record<string, unknown>) => RenderElement>
 
 /** Space, in cells. The only three values any drawing may use. */
 export const SP = {
-  /** Inside a card, left and right; between two cards, vertically. Two cells so a
-   * region's content does not sit against its frame. */
+  /** The page's left margin, a row's first indent, a section's body indent. */
   inline: 2,
-  /** Between two things on one line: columns, filter choices, footers. */
+  /** Between two columns, or two filter items, on one line. */
   group: 2,
-  /** The empty row between two regions. */
+  /** The empty row between two detail sections. */
   section: 1,
 } as const
 
 /** The greys a structural element may take. Colour is never decoration. */
 export const INK = {
-  /** Frame lines, rules, table heads: the quietest thing that still shows. */
+  /** Rules, branch bars, table heads: the quietest thing that still shows. */
   frame: 'inactive',
   /** Secondary words: hints, labels, counts that are not a state. */
   muted: 'subtle',
@@ -41,140 +39,81 @@ export const INK = {
 export type Tone = 'claude' | 'error' | 'warning' | 'success' | 'subtle'
 
 /**
- * The only emoji the panel draws: one per region, and only in a tab or a card
- * title. Every other place uses a single-cell mark from `docs/UI-SPEC.md` §6.
+ * The one status word table. A page never writes a label or picks a colour for
+ * a status itself: the rail, the row tag and the detail tag all read this.
  */
-export const ICON = {
-  openspec: '📋',
-  conversation: '💬',
-  mcp: '🔌',
-  sounds: '🔊',
-  branch: '🔀',
-} as const
-
-/** The row a card begins and ends on, and the one its title sits in. */
-export const ROUND = { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', side: '│', line: '─', dot: '·' } as const
-
-/** The title on a top edge is not allowed to eat more than this share of the card. */
-const HEAD_SHARE = 0.7
-
-/**
- * The top edge: `╭─ icon title ───────────· aside ─╮`, exactly `columns` cells.
- *
- * The engine's Box has no `title`, so the edge is drawn here as text: the title
- * runs from the left corner, the aside from the right, and the line fills
- * whatever stands between them. The title is the one that must be read, so when
- * the two cannot both fit the title keeps its room and the aside steps out.
- */
-export function topEdge(title: string, aside: string, columns: number, icon = '', isBacked = false): string {
-  const width = Math.max(4, columns)
-  const inner = width - 2
-  // The title starts a space in from the corner, as the rows below it start a space
-  // in from their edge: a title flush against `╭` reads as if the frame were missing.
-  // `╭─` then the card's own margin, so the title stands over the rows below it.
-  const lead = `${ROUND.line}${' '.repeat(SP.inline)}${icon === '' ? '' : `${icon} `}`
-  const asideText = aside === '' ? '' : `─ ${ROUND.dot} ${aside} `
-  // The title may take most of the edge, but never the edge itself.
-  const titleRoom = Math.max(1, Math.floor(inner * HEAD_SHARE) - cellsOf(lead))
-  const shown = cellsOf(title) <= titleRoom ? title : endClip(title, titleRoom)
-  const left = `${lead}${shown} `
-  // A page with a way back floats it over the right end of this edge, so the
-  // aside steps out of its way rather than running under it.
-  const withAside = inner - cellsOf(left) - cellsOf(asideText) - (isBacked ? BACK_ROOM : 0)
-  const right = asideText === '' || withAside < 1 ? '─' : asideText
-  const gap = Math.max(0, inner - cellsOf(left) - cellsOf(right))
-
-  return `${ROUND.topLeft}${left}${ROUND.line.repeat(gap)}${right}${ROUND.topRight}`
+export const STATUS_TAG: Record<Group, { full: string; short: string; mini: string; tone: Tone }> = {
+  doing: { full: '进行中', short: '进行', mini: '进', tone: 'claude' },
+  ready: { full: '待归档', short: '待办', mini: '待', tone: 'warning' },
+  broken: { full: '归档异常', short: '异常', mini: '异', tone: 'error' },
+  archived: { full: '已归档', short: '完成', mini: '完', tone: 'success' },
+  bare: { full: '无任务清单', short: '无单', mini: '无', tone: 'subtle' },
 }
 
-/** The bottom edge: `╰─────╯`, exactly `columns` cells. */
-export function bottomEdge(columns: number): string {
-  const width = Math.max(4, columns)
-
-  return `${ROUND.bottomLeft}${ROUND.line.repeat(width - 2)}${ROUND.bottomRight}`
+/** How wide the status column is: two characters above 48 columns, one below. */
+export function tagWidth(columns: number): number {
+  return columns >= 48 ? 5 : 2
 }
 
-/**
- * One row of a card's inside: the content set in from the edges, padded to the
- * card's width. **No vertical sides** — a side drawn per row lands beside whatever
- * the row happens to contain (a Button, two Texts), and any row wider or narrower
- * than the others shifts it. The rounded edges carry the region instead.
- */
-export function cardRow(line: string, columns: number): string {
-  const width = Math.max(4, columns)
-  const gutter = ' '.repeat(SP.inline)
-  const room = Math.max(1, width - SP.inline * 2)
-
-  return `${gutter}${padCells(endClip(line, room), room)}${gutter}`
+/** The status word at this width. */
+export function tagOf(group: Group, columns: number): string {
+  return columns >= 48 ? STATUS_TAG[group].short : STATUS_TAG[group].mini
 }
 
-/**
- * A region card. The body is drawn by the page, one row at a time, through `Body`
- * so that every line lands between the two sides; the page never pads a row or
- * picks a colour for the frame itself.
- *
- * `render` receives the inner width (columns less the sides, less `SP.inline` on
- * each side) and returns the lines that go between them.
- */
-export function drawCard(
-  Box: Kit['Box'],
-  Text: Kit['Text'],
-  card: { title: string; aside?: string; icon?: string; columns: number },
-  lines: (inner: number) => { key: string; line: string }[],
-): RenderElement {
-  const { title, aside = '', icon = '', columns } = card
-  const inner = innerOf(columns)
-  const body = lines(inner)
-
-  return (
-    <Box flexDirection="column">
-      <Text color={INK.frame}>{topEdge(title, aside, columns, icon)}</Text>
-      {body.map(({ key, line }) => (
-        <Text key={key}>{cardRow(line, columns)}</Text>
-      ))}
-      <Text color={INK.frame}>{bottomEdge(columns)}</Text>
-    </Box>
-  )
+/** The colour a stretch speaks with. */
+export function toneOf(group: Group): Tone {
+  return STATUS_TAG[group].tone
 }
 
-/** A small heading inside a card: `─ 会话`, quiet. */
-export function headOf(title: string): string {
-  return `${ROUND.line} ${title}`
-}
-
-/** A full-width rule inside a card. */
-export function ruleOf(inner: number): string {
-  return ROUND.line.repeat(Math.max(0, inner))
-}
-
-/**
- * The right side of the last row of a card: a footer's counts on the left, at
- * most one button on the right, and blanks between them.
- */
-export function footerOf(left: string, right: string, inner: number): string {
-  if (right === '') {
-    return left
-  }
-
-  const room = inner - cellsOf(left) - cellsOf(` ${right}`)
-
-  return room > 0 ? `${left}${' '.repeat(room)} ${right}` : left
-}
-
-/** The cells a card title leaves free at its right end for a floating back button. */
+/** The cells a page title leaves free at its right end for a floating back button. */
 export const BACK_ROOM = 10
 
-/** How many cells a card's body may use, given the card's width. */
-export function innerOf(columns: number): number {
-  return Math.max(2, Math.max(4, columns) - 2 - SP.inline * 2)
+/** A full-width rule: the only horizontal structure direction D draws. */
+export function ruleOf(columns: number): string {
+  return '─'.repeat(Math.max(1, columns))
+}
+
+/** One flat row, padded to the page's width. Columns are already clipped. */
+export function rowOf(line: string, columns: number): string {
+  const width = Math.max(1, columns)
+
+  return padCells(endClip(line, width), width)
+}
+
+/**
+ * The right side of the footer: counts on the left, key hints on the right, and
+ * blanks between them. The left side is never cut to make room for the right.
+ */
+export function footerOf(left: string, right: string, columns: number): string {
+  const width = Math.max(1, columns)
+
+  if (right === '') {
+    return endClip(left, width)
+  }
+
+  const room = width - cellsOf(left) - cellsOf(` ${right}`)
+
+  return room >= 0 ? `${left}${' '.repeat(room)} ${right}` : padCells(endClip(left, width), width)
+}
+
+/**
+ * A detail title in as many rows as it needs. The first row keeps `BACK_ROOM`
+ * clear on the right for the floating back button; every row keeps the page's
+ * left margin. The title is content: it is wrapped, never cut.
+ */
+export function pageTitleOf(title: string, columns: number, hasBack = true): string[] {
+  const room = Math.max(8, columns - SP.inline - (hasBack ? BACK_ROOM : 0))
+
+  return wrapName(title, room)
 }
 
 /** A column of one list. `fill` takes whatever the fixed columns leave. */
 export type Col = { key: string; width?: number; align?: 'left' | 'right'; head?: string }
 
 /**
- * The columns of a list, shared by its heading and every one of its rows. One
- * `fill` column at most, and it must be last: two of them would eat each other.
+ * The columns of a list, shared by its heading (if any) and every one of its
+ * rows. One `fill` column at most, and it must be last: two of them would eat
+ * each other.
  */
 export function widthsOf(cols: readonly Col[], inner: number): number[] {
   const fixed = cols.reduce((sum, one) => sum + (one.width ?? 0), 0)

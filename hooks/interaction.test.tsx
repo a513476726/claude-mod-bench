@@ -96,7 +96,7 @@ function world(on: On) {
 const shown = async (ui: Awaited<ReturnType<typeof mountOf>>) => {
   const texts: string[] = []
 
-  for (const key of ['head-doing', 'head-ready', 'head-broken', 'head-archived', 'head-bare']) {
+  for (const key of ['rail-doing', 'rail-ready', 'rail-broken', 'rail-archived', 'rail-bare']) {
     const found = await ui.find({ type: 'Button', key })
 
     if (found) {
@@ -111,7 +111,7 @@ async function mountOf($: Engine) {
   return $.ui.mount({ ...PANE, surface: 'terminal' })
 }
 
-test('the five stretches are headed, counted and in order', async ($, on) => {
+test('the status rail names, counts and orders the states', async ($, on) => {
   world(on)
   await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
 
@@ -121,24 +121,26 @@ test('the five stretches are headed, counted and in order', async ($, on) => {
   // Only a stretch that holds something is headed: the one archived change is
   // unfinished, so it stands under 归档异常 and 已归档 has no heading at all.
   // The heading's label is its accessible name; its children carry the mark and the count.
-  expect(heads).toEqual(['进行中 1', '待归档 1', '归档异常 1', '无任务清单 1'])
+  expect(heads).toEqual(['进行 1', '待办 1', '异常 1', '完成 0', '无单 1'])
 
   await ui.unmount()
 })
 
-test('a heading folds its stretch and keeps the heading with its count', async ($, on) => {
+test('the status rail filters the list, and the rail keeps its counts', async ($, on) => {
   world(on)
   await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
 
   const ui = await mountOf($)
 
-  await ui.press({ key: 'head-doing' })
+  await ui.press({ key: 'rail-doing' })
 
-  const after = await shown(ui)
+  // The rail stays, with its counts; the other rows are gone.
+  expect((await shown(ui))[0]).toContain('进行 1')
+  expect(await ui.find({ type: 'Button', key: 'row-sales-platform/doing-one' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'row-sales-platform/ready-one' })).toBeUndefined()
 
-  // The heading stays, with the count on it, and its row is gone.
-  expect(after[0]).toContain('进行中 1')
-  expect(await ui.find({ type: 'Button', key: 'row-sales-platform/doing-one' })).toBeUndefined()
+  await ui.press({ key: 'rail-all' })
+  expect(await ui.find({ type: 'Button', key: 'row-sales-platform/ready-one' })).toBeDefined()
 
   await ui.unmount()
 })
@@ -164,6 +166,229 @@ test('a row opens a detail that carries its own way back', async ($, on) => {
   await ui.unmount()
 })
 
+test('the way back floats at the viewport top-right when the window has scrolled', async ($, on) => {
+  world(on)
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, scroll: { offset: 20, bodyRows: 10 } },
+    surface: 'terminal',
+  })
+
+  await ui.press({ key: 'row-sales-platform/doing-one' })
+
+  const slot = await ui.find({ type: 'Box', key: 'back-slot' })
+
+  expect((slot as unknown as { props: { top: number } }).props.top).toBe(20)
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /↑↓/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the way back rests on the first row of a quiet page, clear of the title', async ($, on) => {
+  world(on)
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, bodyColumns: 24, scroll: { offset: 0, bodyRows: 10 } },
+    surface: 'terminal',
+  })
+
+  await ui.press({ key: 'row-sales-platform/doing-one' })
+
+  const slot = await ui.find({ type: 'Box', key: 'back-slot' })
+
+  // A quiet page has no tab row: the back sits on row 0.
+  expect((slot as unknown as { props: { top: number } }).props.top).toBe(0)
+  expect((await ui.find({ type: 'Button', key: 'back' }))?.props?.label).toBe('←返回')
+
+  await ui.unmount()
+})
+
+test('a detail carries the whole name as its title and the state under it', async ($, on) => {
+  world(on)
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'row-sales-platform/doing-one' })
+
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(texts).toContain('doing-one')
+  expect(texts).toContain('进行')
+
+  await ui.unmount()
+})
+
+test('the scroll hook records the tree height the engine reports', async ($, on) => {
+  world(on)
+
+  const seen: Array<{ requestId?: string; contentRows?: number }> = []
+
+  on('ui.scroll', (_, e) => {
+    seen.push(e as never)
+
+    return {}
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'row-sales-platform/doing-one' })
+
+  // The test engine exposes the scroll event as a call: raise it with a window
+  // taller than the page, then let the pane draw again.
+  await $.ui.scroll({
+    component: 'Pane',
+    requestId: 'bench',
+    offset: 0,
+    by: 1,
+    bodyRows: 10,
+    contentRows: 40,
+    origin: { kind: 'person' },
+  })
+  await ui.redraw()
+
+  expect(seen.some(one => one.requestId === 'bench' && one.contentRows === 40)).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /40/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the diff list says exactly how many files it left', async ($, on) => {
+  world(on)
+
+  const files = Array.from({ length: 20 }, (_, at) => `file-${at}.ts`)
+
+  on('process.run', (_, e) => {
+    const argv = [...e.argv]
+
+    if (argv.includes('status')) {
+      return { value: { exitCode: 0, stdout: files.map(one => ` M ${one}`).join('\n'), stderr: '' } as never }
+    }
+
+    if (argv.includes('diff')) {
+      return {
+        value: {
+          exitCode: 0,
+          stdout: files.map(one => `diff --git a/${one} b/${one}\n@@ -1 +1 @@\n-a\n+b`).join('\n'),
+          stderr: '',
+        },
+      } as never
+    }
+
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, scroll: { offset: 0, bodyRows: 8 } },
+    surface: 'terminal',
+  })
+
+  await ui.press({ key: 'diff-.' })
+
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  const hidden = texts.match(/… 还有 (\d+) 个文件/)
+
+  // The quiet page shows what fits, then says how many files it left.
+  expect(Number(hidden?.[1] ?? 0)).toBeGreaterThan(0)
+  // The list was sliced to fit; it cannot scroll, so no position hint is shown.
+  expect(texts).not.toContain('↑↓')
+
+  await ui.unmount()
+})
+
+test('a diff detail shows the whole path, not a clipped one', async ($, on) => {
+  world(on)
+
+  const long = `${'very-long-folder-'.repeat(6)}file.ts`
+
+  on('process.run', (_, e) => {
+    const argv = [...e.argv]
+
+    if (argv.includes('status')) {
+      return { value: { exitCode: 0, stdout: ` M ${long}\n`, stderr: '' } as never }
+    }
+
+    if (argv.includes('diff')) {
+      return {
+        value: {
+          exitCode: 0,
+          stdout: `diff --git a/${long} b/${long}\n@@ -1 +1 @@\n-a\n+b`,
+          stderr: '',
+        },
+      } as never
+    }
+
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'diff-.' })
+  await ui.press({ key: `file-row-${long}` })
+
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('')
+  const squashed = texts.replace(/\s/g, '')
+
+  expect(squashed).toContain(long)
+
+  await ui.unmount()
+})
+
+test('a code page shows a position hint before the engine reports the height', async ($, on) => {
+  world(on)
+
+  on('process.run', (_, e) => {
+    const argv = [...e.argv]
+
+    if (argv.includes('status')) {
+      return { value: { exitCode: 0, stdout: ' M a.ts\n', stderr: '' } as never }
+    }
+
+    if (argv.includes('diff')) {
+      return {
+        value: {
+          exitCode: 0,
+          stdout: 'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n',
+          stderr: '',
+        },
+      } as never
+    }
+
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({
+    ...PANE,
+    props: { ...PANE.props, scroll: { offset: 20, bodyRows: 10 } },
+    surface: 'terminal',
+  })
+
+  await ui.press({ key: 'diff-.' })
+  await ui.press({ key: 'file-row-a.ts' })
+
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  // The engine has not reported contentRows yet; N still says where the window is.
+  expect(texts).toContain('↑↓')
+  expect(texts).toContain('21')
+
+  await ui.unmount()
+})
+
 test('the sounds page holds four switches, a press flips one once, and each previews', async ($, on) => {
   world(on)
   on('audio.play', () => ({ value: undefined }))
@@ -184,13 +409,13 @@ test('the sounds page holds four switches, a press flips one once, and each prev
   expect(await ui.find({ type: 'Button', key: 'preview-done' })).toBeDefined()
 
   // One press, one flip: the row writes the switch and `ui.press` leaves it alone.
-  expect(label(await ui.find({ type: 'Button', key: 'sound-done' }))).toContain('[开]')
+  expect(label(await ui.find({ type: 'Button', key: 'sound-done' }))).toContain('开')
 
   await ui.press({ key: 'sound-done' })
-  expect(label(await ui.find({ type: 'Button', key: 'sound-done' }))).toContain('[关]')
+  expect(label(await ui.find({ type: 'Button', key: 'sound-done' }))).toContain('关')
 
   await ui.press({ key: 'sound-done' })
-  expect(label(await ui.find({ type: 'Button', key: 'sound-done' }))).toContain('[开]')
+  expect(label(await ui.find({ type: 'Button', key: 'sound-done' }))).toContain('开')
 
   await ui.unmount()
 })
@@ -272,7 +497,7 @@ test('a branch with uncommitted work offers a preview, and the preview draws the
 
   await ui.press({ key: 'diff-.' })
 
-  const head = await ui.find({ type: 'Text', text: /未提交改动/ })
+  const head = await ui.find({ type: 'Text', text: /1 个文件/ })
   expect(head?.text ?? '').toContain('1 个文件')
 
   // The list is file by file: one row a file, and the way back under them.
@@ -412,19 +637,18 @@ test('a long new file shows its line count, and its whole text in a scrollable d
   await ui.unmount()
 })
 
-test('every row takes the colour of its stretch, the same one its heading carries', async ($, on) => {
+test('the status tag is the row\'s only colour', async ($, on) => {
   world(on)
   await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
 
   const ui = await mountOf($)
-  // A row is the colour of the stretch it stands in. The row's own Text carries
-  // it, while the Button's label is only the accessible name.
   const texts = (await ui.findAll({ type: 'Text' })) as { props?: { color?: string }; text?: string }[]
-  // The row is drawn once as the Button's plain label and once with its colour;
-  // the coloured one is the row the person sees.
-  const rows = texts.filter(one => String(one.text ?? '').includes('doing-one') && cellsOf(String(one.text ?? '')) > 20)
+  const tags = texts.filter(one => ['进行', '待办', '异常', '完成', '无单'].includes(String(one.text ?? '').trim()))
 
-  expect(rows.map(one => one.props?.color)).toContain('claude')
+  // The status word carries the colour; the row's name stays in body text.
+  expect(tags.map(one => one.props?.color)).toContain('claude')
+  const names = texts.filter(one => String(one.text ?? '').includes('doing-one'))
+  expect(names.every(one => one.props?.color === undefined)).toBe(true)
 
   await ui.unmount()
 })

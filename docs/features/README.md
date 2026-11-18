@@ -8,6 +8,8 @@
 
 | 日期 | 变更 | 影响 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | `token-km-ctx-percent` | 对话 / 横条 / 界面规范 | token 数字改为 K/M（向下取整）；新增上下文读数 `CTX n%`（引擎 `session.usage().context`，真实窗口，70% warning / 90% error），出现在会话统计轨道行尾与 AbovePrompt 横条；按模型下钻只改单位不带百分比；单轮详情保留精确 token；窄屏先丢 CTX，横条先丢 MCP/对话 |
+| 2026-11-17 | `direction-d-tagged-panel` | 全部 / 界面规范 | 界面重置为**方向 D（状态优先 / 平铺）**：状态成为每行第一列，颜色只落在状态标签与状态轨道；页面改为「页签 → 规则线 → 状态/统计轨道 → 平铺行 → 页脚 → 分支轨道」，**移除卡片、emoji、五色分段标题与 `z` 分组折叠**；详情改为安静页（无页签/轨道，标题完整折行、右上返回）；分支从卡片改为无框轨道（最多 3 行 + 查看全部）；OpenSpec 新增状态轨道与紧凑的仓库/时间次要筛选 |
 | 2026-11-09 | `panel-layout-system` | 全部 / 界面规范 | 面板改为「圆角卡片 + 单色强调」：每页一张整宽卡片，标题嵌在上边线、**只画上下边不画竖线**；抽出共用构件 `hooks/ui.tsx`（间距/灰阶/图标令牌、卡片边线、列定义、页脚），页面不再自绘边框与颜色；表头与数据行同出 `LIST_COLS` 且全部左对齐，每行取所属分区配色；详情页独立成页、标题与标签带 emoji、长值按显示宽度折行；卡内分区用 `▏ + emoji` 划分；分支卡支持「查看全部」；新增项目技能 `.claude/skills/bench-ui` |
 | 2026-11-06 | `fix-diff-view-and-sounds` | 分支区 / 提示音 / 全部 | diff 文件详情可滚到末尾；新文件行数按真实内容计（不再 `+0 -0`）；宠物移除，改为独立的「提示音」页签（点行切换 + 试听）；页签、分区、字段标签加 emoji 图标 |
 | 2026-11-06 | `fix-openspec-scan-and-filters` | OpenSpec | 扫描固定起始目录、三种空态分开说、每 5 秒刷新、按仓库/时间筛选；返回统一到右上角 |
@@ -25,7 +27,7 @@
 
 | 页签 | 功能文档 | 一句话 |
 |---|---|---|
-| OpenSpec | [features/openspec](openspec/README.md) | 扫描工作区各仓库的 `openspec/changes/`，按状态五段展示，点开看任务与未完成项 |
+| OpenSpec | [features/openspec](openspec/README.md) | 扫描工作区各仓库的 `openspec/changes/`，平铺成一行一条，第一列是状态标签（进行/待办/异常/完成/无单）；状态轨道筛选，点开看任务与未完成项 |
 | 对话 | [features/conversation](conversation/README.md) | 一轮一行：输入、回答、工具、耗时、token、结束原因；长内容折叠 |
 | MCP | [features/mcp](mcp/README.md) | 按服务器归档每次 MCP 调用：参数、结果、成败、耗时 |
 | 提示音 | [features/sounds](sounds/README.md) | 总开关 + 决策/完成/异常三类提示音，点行切换、点「试听」当场发声 |
@@ -37,9 +39,9 @@
 
 | 区域 | 说明 | 代码 |
 |---|---|---|
-| 开机横条（AbovePrompt） | 始终显示 OpenSpec 总进度、进行中与异常数、MCP 与对话计数；窄屏时是唯一入口 | `hooks/register.tsx` 的 `AbovePrompt` |
-| 分支卡 | 工作区与各仓库的分支、未提交改动数；脏分支可预览 diff、点文件在面板或编辑器里打开。每个页签下都是同一张卡片。[详见 features/branch](branch/README.md) | `hooks/panes.tsx` 的 `branchesLine`、`hooks/scan.ts` 的 `discoverOf` |
-| 共用构件 | 卡片边线、卡内行、列定义、页脚、灰阶与间距令牌；测试见 [tests/ui](../tests/ui/README.md) | `hooks/ui.tsx`（规范见 [UI-SPEC](../../UI-SPEC.md) 与 `.claude/skills/bench-ui/SKILL.md`） |
+| 开机横条（AbovePrompt） | 始终显示 OpenSpec 总进度、进行中与异常数、MCP 与对话计数，以及上下文读数 `CTX n%`（70% / 90% 上色）；窄屏时先丢 MCP、对话，CTX 最后丢 | `hooks/register.tsx` 的 `AbovePrompt` |
+| 分支轨道 | 工作区与各仓库的分支、未提交改动数；无卡片，最多 3 行 + 「查看全部」。脏分支可预览 diff、点文件在面板或编辑器里打开。每个页签下都是同一条轨道。[详见 features/branch](branch/README.md) | `hooks/panes.tsx` 的 `branchRail`、`hooks/scan.ts` 的 `discoverOf` |
+| 共用构件 | 规则线、平铺行、状态标签、状态轨道、页头、字段行、页脚、灰阶与间距令牌；测试见 [tests/ui](../tests/ui/README.md) | `hooks/ui.tsx`（规范见 [UI-SPEC](../UI-SPEC.md) 与 `.claude/skills/bench-ui/SKILL.md`） |
 
 ## 怎么写这个索引
 

@@ -8,8 +8,8 @@
 
 ### 业务边界
 
-- 负责：按模型分组的四项 token 与合计、工具种类与总次数、命令次数。
-- 不负责：跨会话累计、费用金额换算、子代理单独统计。
+- 负责：按模型分组的四项 token 与合计（K / M）、工具种类与总次数、命令次数、当前上下文占用 `CTX`（对话统计行 + AbovePrompt）。
+- 不负责：跨会话累计、费用金额换算、子代理单独统计、自动压缩/清理上下文。
 
 ---
 
@@ -17,13 +17,15 @@
 
 | 版本 | type | status | updated | 正式 Spec | 测试计划 |
 | --- | --- | --- | --- | --- | --- |
-| 2026-11-04 | feat | draft | 2026-11-04 | [Spec](./feat-conversation-log-session-stats-20261104.md) | [测试计划](../../../../ai-feature-tests/开发者工作台/对话记录/会话用量与工具统计/feat-conversation-log-session-stats-20261104.md) |
+| 2026-11-18 | feat | draft | 2026-11-18 | [Spec](./feat-conversation-log-session-stats-20261118.md) | [测试计划](../../../../ai-feature-tests/开发者工作台/对话记录/会话用量与工具统计/feat-conversation-log-session-stats-20261118.md) |
 
 ---
 
 ## 3. 历史版本
 
-无
+| 版本日期 | type | status | 说明 | 文档 |
+| --- | --- | --- | --- | --- |
+| 2026-11-04 | feat | archived | 初始版本：按模型分组的四项 token、工具种类与次数、命令次数 | [Spec](./feat-conversation-log-session-stats-20261104.md) |
 
 ---
 

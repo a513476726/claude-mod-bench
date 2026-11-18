@@ -4,6 +4,7 @@ import type { Engine } from 'claude-code/testing'
 
 import type { NoteSeen } from './conversation'
 import { attachTool, closeTurn, startTurn, statsOf, summaryOf } from './conversation'
+import { cellsOf } from './format'
 
 const at = 1_700_000_000_000
 
@@ -99,7 +100,7 @@ test('a session with nothing yet has nothing to total', () => {
   expect(stats.commandCalls).toBe(0)
 })
 
-test('the session block opens the tools, a tool opens its calls, a call opens itself', async ($, on) => {
+test('the session rail opens the tools, a tool opens its calls, a call opens itself', async ($, on) => {
   worked(on)
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
   await typed($, '先跑几个命令')
@@ -145,6 +146,31 @@ test('the session block opens the tools, a tool opens its calls, a call opens it
   await ui.press({ key: 'back' })
   const top = (await ui.findAll({ type: 'Button' })).map(one => (one as unknown as { key?: string }).key)
   expect(top).toContain('stat-tools')
+
+  await ui.unmount()
+})
+
+test('a tab switch closes the drill and shows the new tab', async ($, on) => {
+  worked(on)
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await typed($, '先跑几个命令')
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'c1', command: 'git status' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: 'stat-tools' })
+  await ui.press({ key: 'drill-all:Bash' })
+  // Quiet pages have no tabs: step back to the conversation list first.
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'tab-sounds' })
+
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(texts).toContain('提示音')
+  expect(texts).not.toContain('调用列表')
+  expect(await ui.find({ type: 'Button', key: 'sound-isOn' })).toBeDefined()
 
   await ui.unmount()
 })
@@ -205,6 +231,10 @@ test('a call’s note is cut where a row stops reading, and the newest 50 stand'
   expect((tool?.notes[0]?.summary.length ?? 0)).toBeLessThanOrEqual(201)
   expect((tool?.notes[0]?.detail.length ?? 0)).toBeLessThanOrEqual(2_001)
   expect((tool?.notes[0]?.result.length ?? 0)).toBeLessThanOrEqual(401)
+  // The cut says why it is a cut, not a wrapping row.
+  expect(tool?.notes[0]?.summary).toContain('已达存储上限 200 字')
+  expect(tool?.notes[0]?.detail).toContain('已达存储上限 2,000 字')
+  expect(tool?.notes[0]?.result).toContain('已达存储上限 400 字')
 })
 
 test('a Skill call is noted by the skill it loaded', () => {
@@ -220,4 +250,134 @@ test('a summary names a Bash command, a Skill, or the tool and its first argumen
   expect(summaryOf('Bash', { command: 'git   status\n', tool: 'Bash' })).toBe('git status')
   expect(summaryOf('Skill', { skill: 'openspec-propose' })).toBe('openspec-propose')
   expect(summaryOf('Read', { file_path: 'hooks/scan.ts' })).toBe('Read · hooks/scan.ts')
+})
+
+/** The engine's own context reading: the window, and the fill it last measured. */
+function measuring(on: On, tokens: number | undefined, window = 1_000_000) {
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: tokens === undefined ? { window } : { tokens, window }, rateLimits: [] },
+  }))
+}
+
+const RAIL_USAGE = {
+  model: 'opus',
+  input_tokens: 120_000,
+  output_tokens: 8_000,
+  cache_read_input_tokens: 340_000,
+  cache_creation_input_tokens: 21_000,
+}
+
+/** One settled round, the hooks it needs, and the conversation tab. */
+async function settled($: Engine, on: On) {
+  worked(on)
+  on('turn.complete', () => ({ text: 'ok' }))
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await typed($, '先跑几个命令')
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't-1', reason: 'answer', usage: RAIL_USAGE })
+}
+
+async function mountAt($: Engine, columns: number) {
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+  await ui.press({ key: 'tab-conversation' })
+
+  return ui
+}
+
+async function conversationOf($: Engine, on: On, columns = 100) {
+  await settled($, on)
+
+  return await mountAt($, columns)
+}
+
+test('the session rail writes its tokens in K and names the context', async ($, on) => {
+  measuring(on, 620_000)
+  const ui = await conversationOf($, on)
+
+  const label = String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')
+
+  expect(label).toContain('入 120K')
+  expect(label).toContain('出 8K')
+  expect(label).toContain('缓存读 340K')
+  expect(label).toContain('缓存写 21K')
+  expect(label).toContain('CTX 62%')
+
+  await ui.unmount()
+})
+
+test('the context reading changes colour at 70 and 90', async ($, on) => {
+  measuring(on, 620_000)
+  on('session.measure', () => ({ changed: ['context'] }))
+
+  const ui = await conversationOf($, on)
+
+  const reading = async () => {
+    const texts = (await ui.findAll({ type: 'Text' })) as { text?: string; props?: { color?: string } }[]
+
+    return texts.find(one => String(one.text ?? '').includes('· CTX') && one.props?.color !== undefined)
+  }
+
+  expect((await reading())?.text).toContain('CTX 62%')
+  expect((await reading())?.props?.color).toBe('subtle')
+
+  await $.session.measure({ context: { tokens: 700_000, window: 1_000_000 }, rateLimits: [], changed: ['context'] })
+  expect((await reading())?.text).toContain('CTX 70%')
+  expect((await reading())?.props?.color).toBe('warning')
+
+  await $.session.measure({ context: { tokens: 900_000, window: 1_000_000 }, rateLimits: [], changed: ['context'] })
+  expect((await reading())?.text).toContain('CTX 90%')
+  expect((await reading())?.props?.color).toBe('error')
+
+  await ui.unmount()
+})
+
+test('a narrow rail drops the context before it shortens its labels', async ($, on) => {
+  measuring(on, 620_000)
+  await settled($, on)
+
+  const labelAt = async (columns: number) => {
+    const ui = await mountAt($, columns)
+    const label = String((await ui.find({ type: 'Button', key: 'stat-models' }))?.props?.label ?? '')
+
+    await ui.unmount()
+
+    return label
+  }
+  const fits = (label: string, columns: number) => expect(cellsOf(label)).toBeLessThanOrEqual(columns - 8)
+
+  const wideLabel = await labelAt(100)
+  expect(wideLabel).toContain('CTX 62%')
+  expect(wideLabel).toContain('缓存读')
+  fits(wideLabel, 100)
+
+  const tightLabel = await labelAt(72)
+  expect(tightLabel).not.toContain('CTX')
+  expect(tightLabel).toContain('缓存读')
+  fits(tightLabel, 72)
+
+  const shortLabel = await labelAt(60)
+  expect(shortLabel).not.toContain('CTX')
+  expect(shortLabel).toContain('读 340K')
+  expect(shortLabel).not.toContain('缓存读')
+  fits(shortLabel, 60)
+
+  // Narrower than the short form: the row keeps its head and is cut, never wrapped.
+  const clippedLabel = await labelAt(40)
+  expect(clippedLabel).not.toContain('CTX')
+  expect(clippedLabel).toContain('入 120K')
+  fits(clippedLabel, 40)
+})
+
+test('the model drill writes its tokens in K and never a percentage', async ($, on) => {
+  measuring(on, 620_000)
+  const ui = await conversationOf($, on)
+
+  await ui.press({ key: 'stat-models' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(page).toContain('入 120K')
+  expect(page).toContain('出 8K')
+  expect(page).not.toContain('%')
+
+  await ui.unmount()
 })

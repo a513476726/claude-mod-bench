@@ -100,3 +100,23 @@ test('a new file counts its own lines, and an unread one says so', async () => {
   expect(of('gone.ts')?.isUnread).toBe(true)
   expect(of('gone.ts')?.added).toBe(0)
 })
+
+test('a file over 60k is cut with a reason, inside the cap', async () => {
+  const $ = { fs: { read: async () => 'x'.repeat(70_000) } } as unknown as EngineInterface
+  const read = await readTextOf($, '/big.txt')
+
+  expect(read.isTrimmed).toBe(true)
+  expect(read.text.length).toBeLessThanOrEqual(60_000)
+  expect(read.text).toContain('文件超过 60,000 字，已截断')
+})
+
+test('a diff group over 60k is cut with a reason and flagged', () => {
+  const body = 'x'.repeat(70_000)
+  const text = `diff --git a/big.ts b/big.ts\n@@ -1 +1 @@\n-${body}\n+${body}\n`
+  const groups = diffGroupsOf(text, [], '')
+  const group = groups[0]
+
+  expect(group?.isTruncated).toBe(true)
+  expect(group?.text.length ?? 0).toBeLessThanOrEqual(60_000)
+  expect(group?.text).toContain('diff 超过 60,000 字，已截断')
+})

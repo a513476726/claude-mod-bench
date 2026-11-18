@@ -117,6 +117,8 @@ test('a long answer folds to half the screen, and the end still shows', async ($
   // 40 rows → the answer may take 20; the fold says how many of the 200 it kept.
   expect((await ui.find({ type: 'Text', text: /共 200 行，已显示 \d+ 行/ }))?.text).toContain('共 200 行')
   expect(await ui.find({ type: 'Button', key: 'full-answer' })).toBeDefined()
+  // The detail's edge names its kind; the summary is in the body.
+  expect(await textsOf(ui)).toContain('写个长报告')
   // The tail is drawn after the folded body, so it stays inside one screen.
   expect(await textsOf(ui)).toContain('结束')
 
@@ -156,13 +158,72 @@ test('the whole answer opens on request, and steps back to the detail', async ($
   const title = (await ui.findAll({ type: 'Text' })).map(one => String((one as { text?: string }).text ?? '')).find(one => one.includes('共 200 行'))
   expect(title ?? '').toContain('共 200 行')
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
-  expect((await textsOf(ui)).split('\n').some(row => row === '答200行')).toBe(true)
+  expect((await textsOf(ui)).split('\n').some(row => row.trim() === '答200行')).toBe(true)
 
   await ui.press({ key: 'back' })
 
   // Back on the detail: the fold is there again, and the shared way out with it.
   expect(await ui.find({ type: 'Text', text: /共 200 行，已显示/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the whole-body view keeps a long line and its indentation', async ($, on) => {
+  quiet(on)
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ origin: { kind: 'composer' }, wait: false, text: '长行' })
+  const answer = [
+    `    ${'x'.repeat(200)}`,
+    ...Array.from({ length: 30 }, (_, at) => `第 ${at + 1} 行 ${'y'.repeat(50)}`),
+  ].join('\n')
+
+  await $.turn.complete({
+    turnId: 'turn-1',
+    reason: 'answer',
+    durationMs: 3_000,
+    answer,
+    isAborted: false,
+  } as never)
+
+  const ui = await $.ui.mount({ ...pane(24), surface: 'terminal' })
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: await rowKey(ui) })
+  await ui.press({ key: 'full-answer' })
+
+  const text = await textsOf(ui)
+
+  // Every character is drawn; the card's own gutters are the only spaces at a
+  // break, so drop whitespace to check the run survived.
+  expect(text.replace(/\s/g, '')).toContain('x'.repeat(200))
+  // The source's four spaces survive after the card's own margin.
+  const xRow = text.split('\n').find(row => row.includes('xxxx'))
+
+  expect(xRow).toContain('    x')
+
+  await ui.unmount()
+})
+
+test('a huge whole-body page stops at the display budget with a notice', async ($, on) => {
+  quiet(on)
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ origin: { kind: 'composer' }, wait: false, text: '写个超长报告' })
+  await $.turn.complete({
+    turnId: 'turn-1',
+    reason: 'answer',
+    durationMs: 3_000,
+    answer: Array.from({ length: 2_000 }, (_, at) => `第 ${at + 1} 行`).join('\n'),
+    isAborted: false,
+  } as never)
+
+  const ui = await $.ui.mount({ ...pane(24), surface: 'terminal' })
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: await rowKey(ui) })
+  await ui.press({ key: 'full-answer' })
+
+  expect(await textsOf(ui)).toContain('未显示（达到显示上限）')
 
   await ui.unmount()
 })
@@ -231,9 +292,9 @@ test('an answer is a section of its own: marked at the left, indented, never cut
     wrap: one.props?.wrap,
   }))
 
-  // The section's left edge is drawn, and its body sits under its heading.
-  expect(texts.some(one => one.text.includes('▏ 💬 回答'))).toBe(true)
-  expect(texts.some(one => one.text.includes('▏   如果需要我干活'))).toBe(true)
+  // The section heading is drawn, and its body sits under it.
+  expect(texts.some(one => one.text.trim() === '回答')).toBe(true)
+  expect(texts.some(one => one.text.includes('如果需要我干活'))).toBe(true)
 
   // Nothing in a section is cut at the edge: it wraps, or it was short enough.
   expect(texts.filter(one => one.wrap === 'truncate-end' && one.text !== '').map(one => one.text)).toEqual([])
@@ -241,7 +302,7 @@ test('an answer is a section of its own: marked at the left, indented, never cut
   await ui.unmount()
 })
 
-test('every detail field starts on the same cell, emoji or not', async ($, on) => {
+test('every detail field starts on the same cell', async ($, on) => {
   quiet(on)
 
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
@@ -252,12 +313,12 @@ test('every detail field starts on the same cell, emoji or not', async ($, on) =
   await ui.press({ key: await rowKey(ui) })
 
   const rows = ((await ui.findAll({ type: 'Text' })) as { text?: string }[]).map(one => String(one.text ?? ''))
-  // The label column is one width: 🕒 时间 and 🏷️ 类型 are padded to the same
-  // number of cells, so the values beside them begin on the same cell.
+  // The label column is one width: the plain labels 时间 and 类型 are padded to the
+  // same number of cells, so the values beside them begin on the same cell.
   // The label alone (the row that holds nothing but the padded label), not the
   // whole field line with its value.
-  const time = rows.find(one => /^🕒 时间\s*$/.test(one.trim()))
-  const kind = rows.find(one => /^🏷️ 类型\s*$/.test(one.trim()))
+  const time = rows.find(one => /^时间\s*$/.test(one.trim()))
+  const kind = rows.find(one => /^类型\s*$/.test(one.trim()))
   expect(time).toBeDefined()
   expect(kind).toBeDefined()
   // Both labels are padded into one column, so they take the same cells.

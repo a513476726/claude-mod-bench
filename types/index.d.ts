@@ -161,17 +161,26 @@ declare module 'claude-code' {
       decisions: Shaped<Turn[]>
       calls: Shaped<Call[]>
       branches: Shaped<Branch[]>
+      /** The live context window's fill, as the engine last measured it: the model's
+       * window, and the input side of the last response once one has come back. */
+      ctx: Shaped<{ tokens?: number; window: number }>
       sounds: Shaped<SoundSettings>
       view: Shaped<{
         tab: string
         index: number
         isDetail: boolean
-        closed: string[]
         fullSection: 'input' | 'answer' | null
         /** How deep the person has drilled from the tab's own list; empty at the list. */
         path: string[]
         /** What the OpenSpec list is narrowed to. */
-        filter: { repo: string; since: 'all' | 'today' | '7d' | '30d' }
+        filter: { repo: string; since: 'all' | 'today' | '7d' | '30d'; status: string }
+        /** Whether the branch rail shows every repo, or only its first few. */
+        isBranchOpen?: boolean
+      }>
+      /** Where the pane's window stood, and which page the engine reported it for. */
+      scrollInfo: Shaped<{
+        contentRows: number
+        page: string
       }>
       diff: Shaped<{
         repo: string

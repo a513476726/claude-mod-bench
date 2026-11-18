@@ -33,7 +33,7 @@ test('nothing narrowed keeps every change', () => {
 })
 
 test('one repo keeps only that repo', () => {
-  const kept = filterOf(CHANGES, { repo: 'a', since: 'all' }, NOW)
+  const kept = filterOf(CHANGES, { repo: 'a', since: 'all', status: 'all' }, NOW)
 
   expect(kept.map(change => change.mtime)).toEqual([CHANGES[0]?.mtime, CHANGES[2]?.mtime])
 })
@@ -44,20 +44,20 @@ test('today is the day the clock is on, not the last 24 hours', () => {
   const late = new Date('2026-11-06T14:59:00').getTime()
   const lastNight = new Date('2026-11-05T23:59:00').getTime()
 
-  expect(filterOf([one('x', early), one('x', late), one('x', lastNight)], { repo: 'all', since: 'today' }, NOW)).toHaveLength(2)
+  expect(filterOf([one('x', early), one('x', late), one('x', lastNight)], { repo: 'all', since: 'today', status: 'all' }, NOW)).toHaveLength(2)
 })
 
 test('a week reaches back seven days and no further', () => {
-  const kept = filterOf(CHANGES, { repo: 'all', since: '7d' }, NOW)
+  const kept = filterOf(CHANGES, { repo: 'all', since: '7d', status: 'all' }, NOW)
 
   expect(kept).toHaveLength(2)
 })
 
 test('a month reaches back thirty days', () => {
-  expect(filterOf(CHANGES, { repo: 'all', since: '30d' }, NOW)).toHaveLength(3)
+  expect(filterOf(CHANGES, { repo: 'all', since: '30d', status: 'all' }, NOW)).toHaveLength(3)
 })
 
 test('repo and age narrow together', () => {
-  expect(filterOf(CHANGES, { repo: 'a', since: '7d' }, NOW)).toHaveLength(1)
-  expect(filterOf(CHANGES, { repo: 'c', since: '7d' }, NOW)).toHaveLength(0)
+  expect(filterOf(CHANGES, { repo: 'a', since: '7d', status: 'all' }, NOW)).toHaveLength(1)
+  expect(filterOf(CHANGES, { repo: 'c', since: '7d', status: 'all' }, NOW)).toHaveLength(0)
 })
