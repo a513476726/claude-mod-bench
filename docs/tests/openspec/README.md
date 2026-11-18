@@ -42,6 +42,21 @@ claude plugin test . 2>&1 | grep openspec   # 只看这一块（按测试名过�
 | a long value wraps by display width, keeping whole words where it can | `hooks/scan.test.tsx` | `wrapCells` 不丢字符、单行不超宽、按词折行 |
 | a long field value wraps within the page, not a few cells past it | `hooks/scan.test.tsx` | 详情每一行都 ≤ 页面宽度，不会被引擎再次折行 |
 
+### 收尾台（`hooks/closeout.test.tsx`、`hooks/interaction.test.tsx`、`hooks/items.test.tsx`）
+
+| 测试 | 验的是什么 |
+|---|---|
+| all tasks ticked, a proposal and specs: ready to archive | 全就绪 → `isReady: true` |
+| a missing proposal is named in the person’s words | 缺 proposal 的文案 |
+| missing specs are named, whether the folder or its files are what says so | 缺 specs（目录或 spec 文件都没有） |
+| open tasks are counted, and no tasks at all is its own gap | 未完成任务计数、无 tasks.md、tasks.md 无任务 |
+| an archived change is never offered another archive | 已归档不再就绪；归档异常保留缺项 |
+| a change detail preflights its next step and opens its files, never submitting | 继续 / 归档预填命令、`prompt.fill` 被调用、打开 tasks/specs 文件、收尾计数行、返回列表 |
+| a change whose input box is unavailable says so, and never submits | `isFilled: false` → 页脚「输入框不可用」 |
+| a change that is not ready says what it still owes, and offers no archive | 未就绪无归档按钮，写「还差 2 项」 |
+| the next-step actions fit 80, 40 and 24 columns without overflowing | 下一步分区在三个宽度下不溢出 |
+| the closeout tally counts the four buckets, with a week as the stale line | `进行/待收尾/异常/陈旧` 与正好 7 天的边界 |
+
 ## 未自动化的部分
 
 - **真实终端的列位与颜色**：测试断言的是自绘文本宽度；引擎对 `Button` 内 `Text` 的最终列位、标签颜色仍需人眼复核。

@@ -1,9 +1,12 @@
 import type { EngineInterface, PluginOptions, RenderElement, RenderSurface, UiPressArgument } from 'claude-code'
 
-import type { Branch, ScanState, SoundSettings } from '../types'
+import type { AgentRow, Branch, Meter, ScanState, SoundSettings, SpecChange } from '../types'
 import { statsOf } from './conversation'
-import { editorOf, type DiffGroup, type DiffShown, type FileShown } from './files'
-import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, wrapKeep } from './format'
+import { closeoutOf } from './closeout'
+import { type DiffGroup, type DiffShown, type FileShown } from './files'
+import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, spanOf, whenOf, wrapKeep } from './format'
+import { failuresOf, groupFailures, isLooping } from './failure'
+import { quotaOf, usdOf, type BreakdownRow, type BreakdownStore } from './meter'
 import {
   DETAIL_BUDGET,
   GROUP_ORDER,
@@ -11,8 +14,14 @@ import {
   STATS_KEYS,
   TOOLS_ROW,
   callDetailOf,
+  AGENT_TONE,
+  closeoutTallyOf,
+  agentItemsOf,
   drillItemsOf,
+  filterOf,
+  headLineOf,
   itemsOf,
+  soundItemsOf,
   takeRows,
   tallyOf,
   type DetailSection,
@@ -22,6 +31,7 @@ import {
 } from './items'
 import type { Group } from './scan'
 import { firstLineOf, type Prompt } from './prompts'
+import { stringsOf, type Lang } from './strings'
 import {
   INK,
   SP,
@@ -36,18 +46,45 @@ import {
   type Tone,
 } from './ui'
 
-/** How wide the tab row is at a width: labels, bracketed or plain, gaps and the count. */
-/** The tail a prompt row draws, and the room its words may take: measured, not guessed. */
+/**
+ * The tail a prompt row draws, and the room its words may take: measured, not
+ * guessed. Below 56 columns the scope and launch count go; the copy count, the
+ * copy button and the delete button stay.
+ */
 export function promptTailOf(
   columns: number,
   copies: number,
+  launches: number,
+  scope: 'global' | 'project',
   pending: boolean,
-): { countText: string; askText: string; tailCells: number; room: number } {
-  const countText = columns >= 56 ? `×${copies}  ` : ''
-  const askText = pending ? '确认删除？ ' : ''
-  const tailCells = cellsOf(countText) + cellsOf(askText) + cellsOf('删除') + (pending ? 1 + cellsOf('取消') : 0) + 1
+): {
+  scopeText: string
+  countText: string
+  launchText: string
+  askText: string
+  showCopy: boolean
+  tailCells: number
+  room: number
+} {
+  const wide = columns >= 56
+  const scopeText = wide ? `${scope === 'global' ? '全局' : '项目'}  ` : ''
+  // The narrowest rows shorten the question and let the copy door and the count
+  // go while the delete is being confirmed: the row must still fit its page.
+  const countText = pending && columns < 32 ? '' : `×${copies}  `
+  const launchText = wide ? `发${launches}  ` : ''
+  const askText = pending ? (columns < 40 ? '确认？ ' : '确认删除？ ') : ''
+  const showCopy = !(pending && columns < 32)
+  const tailCells =
+    cellsOf(scopeText) +
+    cellsOf(countText) +
+    cellsOf(launchText) +
+    cellsOf(askText) +
+    (showCopy ? cellsOf('复制') : 0) +
+    cellsOf('删除') +
+    (pending ? 1 + cellsOf('取消') : 0) +
+    2
 
-  return { countText, askText, tailCells, room: Math.max(1, columns - SP.inline - tailCells) }
+  return { scopeText, countText, launchText, askText, showCopy, tailCells, room: Math.max(1, columns - SP.inline - tailCells) }
 }
 
 export function tabRowCellsOf(columns: number, count: number): number {
@@ -63,11 +100,10 @@ export function tabRowCellsOf(columns: number, count: number): number {
 }
 
 export const TABS = [
-  { id: 'openspec', label: 'OpenSpec', short: 'Spec', hint: '1' },
-  { id: 'conversation', label: '对话', short: '对话', hint: '2' },
-  { id: 'mcp', label: 'MCP', short: 'MCP', hint: '3' },
-  { id: 'sounds', label: '提示音', short: '音', hint: '4' },
-  { id: 'other', label: '其他', short: '其他', hint: '5' },
+  { id: 'conversation', label: '会话', short: '会话', hint: '1' },
+  { id: 'spec', label: '变更', short: '变更', hint: '2' },
+  { id: 'agent', label: '代理', short: '代理', hint: '3' },
+  { id: 'more', label: '更多', short: '更多', hint: '4' },
 ] as const
 
 /** The OpenSpec row at its widest; narrower pages drop columns from the right. */
@@ -126,6 +162,55 @@ export function soundColsOf(columns: number): Col[] {
   ]
 }
 
+/** One optional reading at the end of the conversation rail. */
+export type RailPart = { key: 'ctx' | 'five_hour' | 'seven_day' | 'usd'; text: string; tone: Tone }
+
+/**
+ * The rail's tail, selected by width. The full head is tried first; within it,
+ * parts are kept in display order and dropped in reverse (cost, then the seven-day
+ * window, then the five-hour one, then CTX). Only when even the full head alone
+ * does not fit are `缓存读 / 缓存写` shortened to `读 / 写` — by then every part is
+ * gone, which is the order the spec promises. The row never wraps.
+ */
+export function railOf(
+  base: string,
+  narrow: string,
+  reading: { text: string; tone: Tone },
+  meter: Meter,
+  room: number,
+): { head: string; parts: RailPart[] } {
+  const isFull = cellsOf(base) <= room
+  const head = isFull ? base : cellsOf(narrow) <= room ? narrow : endClip(narrow, Math.max(1, room))
+  const five = quotaOf(meter, 'five_hour')
+  const seven = quotaOf(meter, 'seven_day')
+  const candidates: RailPart[] = [
+    { key: 'ctx', text: ` · CTX ${reading.text}`, tone: reading.tone },
+    ...(five === undefined ? [] : [{ key: 'five_hour' as const, text: ` · 5h ${five.text}`, tone: five.tone as Tone }]),
+    ...(seven === undefined ? [] : [{ key: 'seven_day' as const, text: ` · 7d ${seven.text}`, tone: seven.tone as Tone }]),
+    { key: 'usd', text: ` · ${usdOf(meter.usd)}`, tone: 'subtle' as Tone },
+  ]
+  const parts: RailPart[] = []
+
+  if (!isFull) {
+    return { head, parts }
+  }
+
+  let left = room - cellsOf(head)
+
+  for (const one of candidates) {
+    const width = cellsOf(one.text)
+
+    if (width > left) {
+      break
+    }
+
+    parts.push(one)
+    left -= width
+  }
+
+  return { head, parts }
+}
+
 /** The tab on show, the row the ring is on, and whether that row is open. */
 export type PaneState = {
   tab: TabId
@@ -160,8 +245,20 @@ export type PaneData = {
   stored: Parameters<typeof itemsOf>[1]
   /** The context window's fill, as the engine last measured it. */
   ctx: ContextFill
+  /** The session's cost and quota windows, read from the same usage call as `ctx`. */
+  meter: Meter
+  /** The context window by category, read on demand for the breakdown page. */
+  breakdown: BreakdownStore
   /** The saved prompts, in display order. */
   prompts: PromptStore
+  /** The editor the plugin is set to use, and the choices its config row offers. */
+  editor: { current: string; options: string[]; error?: string }
+  /** The session's subagents and teammates, in roster order. */
+  agents: AgentRow[]
+  /** The language the panel speaks. */
+  lang: Lang
+  /** The transcript read for the open agent's detail. */
+  agentMessages: { id: string; lines: string[]; isTruncated?: boolean; error?: string }
   branches: Branch[]
   diff: DiffShown | null
   file: FileShown | null
@@ -169,9 +266,33 @@ export type PaneData = {
   scroll: { contentRows: number; page: string }
 }
 
+/**
+ * A stored page from the five-tab build, moved onto today's four: the old
+ * OpenSpec tab becomes 变更, the old MCP tab becomes 会话 with its MCP door
+ * open, and the old 提示音 / 其他 tabs become 更多. A page already on the four
+ * tabs is left exactly as it was.
+ */
+export function migrateView(stored: PaneState): PaneState {
+  const tab = stored.tab as string
+  const base = { ...stored, index: 0, isDetail: false, fullSection: null }
+
+  if (tab === 'openspec') {
+    return { ...base, tab: 'spec', path: [] }
+  }
+
+  if (tab === 'mcp') {
+    return { ...base, tab: 'conversation', path: ['mcp'] }
+  }
+
+  if (tab === 'sounds' || tab === 'other') {
+    return { ...base, tab: 'more', path: [] }
+  }
+
+  return stored
+}
+
 /** The page an offset belongs to: a drill level, a diff file, a full body, a list. */
-export function pageKeyOf(state: PaneState, diff: DiffShown | null, file: FileShown | null): string {
-  if (file !== null) {
+export function pageKeyOf(state: PaneState, diff: DiffShown | null, file: FileShown | null): string {  if (file !== null) {
     return `file:${file.path}`
   }
 
@@ -215,7 +336,21 @@ export type PaneActions = {
   editFile: (repo: string, rel: string) => Promise<void>
   /** Enter the prompt shelf, sorted as the person left it. */
   openPrompts: (next: PaneState) => Promise<void>
+  /** Read the context breakdown, then open its page. */
+  showBreakdown: (next: PaneState) => Promise<void>
+  /** Read the context breakdown again, staying on its page. */
+  refreshBreakdown: () => Promise<void>
+  /** Read the editor choices, then open the editor page. */
+  openEditor: (next: PaneState) => Promise<void>
+  /** Set the plugin's editor option, keeping the page where it is. */
+  chooseEditor: (value: string) => Promise<void>
+  /** Read one agent's transcript, then open its detail page. */
+  openAgent: (next: PaneState, id: string) => Promise<void>
   copyPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
+  /** Put a prompt in the input box; no box falls back to a copy. */
+  launchPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
+  /** Prefill a command (a change's next step); never submit it. */
+  fillPrompt: (text: string) => Promise<void>
   askDelete: (id: string) => Promise<void>
   cancelDelete: () => Promise<void>
   confirmDelete: (id: string) => Promise<void>
@@ -245,9 +380,12 @@ export async function drawPane(
   const contentRows = data.scroll.page === page ? data.scroll.contentRows : 0
   const rows = Math.max(3, e.props.scroll.bodyRows)
   const columns = Math.max(24, e.props.bodyColumns)
-  const isSpec = state.tab === 'openspec'
+  const words = stringsOf(data.lang)
+  const isSpec = state.tab === 'spec'
   const now = await $.clock.now()
-  const all = itemsOf(state.tab, stored, state.filter, now, Math.max(8, columns - SP.inline))
+  const all = state.tab === 'agent'
+    ? agentItemsOf(data.agents, now, words.agent.status)
+    : itemsOf(state.tab, stored, state.filter, now, Math.max(8, columns - SP.inline), data.editor.current)
   const counts = isSpec ? tallyOf(all) : new Map<Group, number>()
   const items = isSpec && state.filter.status !== 'all'
     ? all.filter(one => one.group === state.filter.status)
@@ -261,7 +399,7 @@ export async function drawPane(
   const branchRows = branches.length === 0
     ? 0
     : branchShown + (branches.length > branchMax && state.isBranchOpen !== true ? 1 : 0)
-  const railRows = isSpec ? 2 : state.tab === 'conversation' ? (rows < 20 ? 1 : 2) : 1
+  const railRows = isSpec ? 3 : state.tab === 'conversation' ? (rows < 20 ? 1 : 2) : 1
   const room = Math.max(1, rows - 5 - railRows - branchRows)
 
   /** One plain line inside a page, padded to its width. */
@@ -279,7 +417,7 @@ export async function drawPane(
       <Text> </Text>
       {TABS.flatMap((one, at) => {
         const isOn = state.tab === one.id
-        const label = columns < 40 ? one.short : one.label
+        const label = columns < 40 ? words.tabs[one.id].short : words.tabs[one.id].label
         const pick = () => actions.navigateTab({ ...state, tab: one.id, index: 0, isDetail: false, fullSection: null, path: [] })
 
         const node = isOn ? (
@@ -347,19 +485,51 @@ export async function drawPane(
       ))}
       <Text color={INK.frame}>{ruleOf(columns)}</Text>
       <Box flexDirection="column" flexGrow={0} flexShrink={0}>{body}</Box>
+      {state.flash == null ? null : (
+        <Text
+          color={
+            state.flash.text.startsWith('已填入')
+              ? 'success'
+              : state.flash.text.startsWith('已复制')
+                ? 'warning'
+                : 'error'
+          }
+        >
+          {`${' '.repeat(SP.inline)}${endClip(state.flash.text, Math.max(4, columns - SP.inline))}`}
+        </Text>
+      )}
       {detailChrome(Box, Text, Button, opts.onBack, offset, rows, contentRows, columns, true, opts.isScrollable === true)}
     </Box>
   )
 
 
-  /** One saved prompt: the row copies, the tail deletes after a second press. */
+  /** One saved prompt: a press launches it, the tail copies or deletes it. */
   const promptRow = (one: Prompt) => {
     const pending = state.pendingDelete === one.id
-    const { countText, askText, room } = promptTailOf(columns, one.copies, pending)
+    const { scopeText, countText, launchText, askText, showCopy, room } = promptTailOf(
+      columns,
+      one.copies,
+      one.launches,
+      one.scope,
+      pending,
+    )
     const first = endClip(firstLineOf(one.text), room)
     const tail = [
-      countText === '' ? null : <Text key="count" color={INK.muted}>{countText}</Text>,
+      scopeText === '' ? null : <Text key="scope" color={INK.muted}>{scopeText}</Text>,
+      <Text key="count" color={INK.muted}>{countText}</Text>,
+      launchText === '' ? null : <Text key="launch" color={INK.muted}>{launchText}</Text>,
       askText === '' ? null : <Text key="ask" color="warning">{askText}</Text>,
+      showCopy ? (
+        <Button
+          key={`prompt-copy:${one.id}`}
+          label="复制"
+          plain
+          onPress={(press: UiPressArgument) => void actions.copyPrompt(one.id, one.text, press.surface)}
+        >
+          <Text dimColor>复制</Text>
+        </Button>
+      ) : null,
+      <Text key="gap"> </Text>,
       pending ? (
         <Button key={`prompt-del-ok:${one.id}`} label="删除" plain onPress={() => void actions.confirmDelete(one.id)}>
           <Text color="error">删除</Text>
@@ -369,7 +539,7 @@ export async function drawPane(
           <Text dimColor>删除</Text>
         </Button>
       ),
-      pending ? <Text key="gap"> </Text> : null,
+      pending ? <Text key="gap-2"> </Text> : null,
       pending ? (
         <Button key={`prompt-del-cancel:${one.id}`} label="取消" plain onPress={() => void actions.cancelDelete()}>
           <Text dimColor>取消</Text>
@@ -384,7 +554,7 @@ export async function drawPane(
           key={`prompt:${one.id}`}
           plain
           label={one.text}
-          onPress={(press: UiPressArgument) => void actions.copyPrompt(one.id, one.text, press.surface)}
+          onPress={(press: UiPressArgument) => void actions.launchPrompt(one.id, one.text, press.surface)}
         >
           <Text wrap="truncate-end">
             <Text>{' '.repeat(SP.inline)}</Text>
@@ -401,8 +571,14 @@ export async function drawPane(
   const promptsPage = () => {
     const list = data.prompts.list
     const flash = state.flash?.text
-    const tone = flash === undefined ? INK.muted : flash === '已复制' ? 'success' : flash.startsWith('已复制') ? 'warning' : 'error'
-    const foot = endClip(flash ?? `${list.length} 条 · 点行复制`, Math.max(4, columns - SP.inline))
+    const tone = flash === undefined
+      ? INK.muted
+      : flash.startsWith('已填入')
+        ? 'success'
+        : flash.startsWith('已复制')
+          ? 'warning'
+          : 'error'
+    const foot = endClip(flash ?? `${list.length} 条 · 点行发射`, Math.max(4, columns - SP.inline))
 
     return quietPage('prompt 收藏', (
       <Box flexDirection="column">
@@ -514,27 +690,73 @@ export async function drawPane(
   }
 
 
-  /** The one door the 其他 tab opens to. */
-  const otherRow = (item: Item, at: number) => (
-    <Box key={`other-${item.id}`} flexDirection="row">
-      <Button
-        key={`other:${item.id}`}
-        plain
-        label={item.line}
-        onPress={() => void actions.openPrompts({ ...state, path: ['prompts'], index: 0, isDetail: false })}
-      >
-        <Text wrap="truncate-end">
-          <Text>{' '.repeat(SP.inline)}</Text>
-          <Text color={at === index ? INK.accent : undefined}>{at === index ? '▸ ' : '  '}</Text>
-          <Text bold={at === index}>{item.name ?? item.line}</Text>
-        </Text>
-      </Button>
-    </Box>
-  )
+  /** The four closeout counts, kept to one row; zero counts and the right edge go first. */
+  const closeoutRail = () => {
+    const tally = closeoutTallyOf(filterOf(stored.changes, state.filter, now), now)
+    const entries = [
+      { key: 'doing', label: '进行', count: tally.doing },
+      { key: 'ready', label: '待收尾', count: tally.ready },
+      { key: 'broken', label: '异常', count: tally.broken },
+      { key: 'stale', label: '陈旧', count: tally.stale },
+    ].filter(one => one.count > 0)
+    const used = columns - SP.inline
+    let width = 0
+    const nodes: RenderElement[] = []
+
+    for (const one of entries) {
+      const text = `${one.label} ${one.count}`
+      const add = cellsOf(text) + (nodes.length === 0 ? 0 : 3)
+
+      if (width + add > used) {
+        break
+      }
+
+      width += add
+      nodes.push(...(nodes.length === 0 ? [] : [<Text key={`closeout-gap-${one.key}`} color={INK.frame}>{' · '}</Text>]), (
+        <Text key={`closeout-${one.key}`} color={INK.muted}>{text}</Text>
+      ))
+    }
+
+    return nodes.length === 0 ? null : (
+      <Box flexDirection="row">
+        <Text>{' '.repeat(SP.inline)}</Text>
+        {nodes}
+      </Box>
+    )
+  }
+
+  /** One door on the more page: the prompt shelf, the sounds, or the editor. */
+  const moreRow = (item: Item, at: number) => {
+    const open = () => {
+      if (item.id === 'more-prompts') {
+        return actions.openPrompts({ ...state, path: ['prompts'], index: 0, isDetail: false })
+      }
+
+      if (item.id === 'more-sounds') {
+        return actions.navigate({ ...state, path: ['sounds'], index: 0, isDetail: false })
+      }
+
+      return actions.openEditor({ ...state, path: ['editor'], index: 0, isDetail: false })
+    }
+
+    return (
+      <Box key={`more-${item.id}`} flexDirection="row">
+        <Button key={`more:${item.id}`} plain label={item.line} onPress={() => void open()}>
+          <Text wrap="truncate-end">
+            <Text>{' '.repeat(SP.inline)}</Text>
+            <Text color={at === index ? INK.accent : undefined}>{at === index ? '▸ ' : '  '}</Text>
+            <Text bold={at === index}>{item.name ?? item.line}</Text>
+            {item.id === 'more-editor' ? <Text color={INK.muted}>{`  ${data.editor.current}`}</Text> : null}
+          </Text>
+        </Button>
+      </Box>
+    )
+  }
 
   /** The session rail: one summary line, or two when the pane can afford it. */
   const statsRail = () => {
     const stats = statsOf(stored.turns)
+    const failures = groupFailures(stored.turns).reduce((sum, one) => sum + one.count, 0)
     const rounds = stats.models.reduce((sum, one) => sum + one.turns, 0)
     const reading = ctxOf(data.ctx.tokens, data.ctx.window)
     const tokensOf = (one: typeof stats.total, isShort: boolean) =>
@@ -544,43 +766,87 @@ export async function drawPane(
     const lead = stats.models.length === 0 ? '（暂无用量）' : `${rounds} 轮 · ${stats.models.length} 个模型  `
     const base = stats.models.length === 0 ? lead : `${lead}${tokensOf(stats.total, false)}`
     const narrow = stats.models.length === 0 ? lead : `${lead}${tokensOf(stats.total, true)}`
-    const tail = ` · CTX ${reading.text}`
 
-    // The context reading goes first when the row is tight: the list matters more.
+    // The context reading is a door of its own, so the rail is a row of parts: the
+    // session's own words, then CTX, then the quota windows and the cost.
     const room = columns - SP.inline - cellsOf('会话') - SP.inline
-    const hasCtx = cellsOf(base) + cellsOf(tail) <= room
-    const body = !hasCtx && cellsOf(base) > room ? narrow : base
-    // A row narrower than even the short form keeps its head and loses its tail:
-    // nothing here may wrap the rail into a second row.
-    const kept = cellsOf(body) > room ? endClip(body, room) : body
-    const summary = `${kept}${hasCtx ? tail : ''}`
+    const rail = railOf(base, narrow, reading, data.meter, room)
+    // What the row says, without the fixed `会话` tag: the tag is drawn by the button
+    // but is not part of the measured body, so a test can hold it to the page width.
+    const label = `${rail.head}${rail.parts.map(one => one.text).join('')}`
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
           <Text>{' '.repeat(SP.inline)}</Text>
-          <Button key="stat-models" label={summary} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.models], index: 0, isDetail: false })}>
+          <Button key="stat-models" label={label} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.models], index: 0, isDetail: false })}>
             <Text>
               <Text color={INK.accent}>会话</Text>
-              <Text color={INK.muted}>{`  ${kept}`}</Text>
-              {hasCtx ? <Text key="stat-ctx" color={reading.tone}>{tail}</Text> : null}
+              <Text color={INK.muted}>{`  ${rail.head}`}</Text>
             </Text>
           </Button>
+          {rail.parts.map(one => one.key === 'ctx' ? (
+            <Button
+              key="stat-ctx"
+              label={`CTX ${reading.text}`}
+              plain
+              onPress={() => void actions.showBreakdown({ ...state, tab: 'conversation', path: ['ctx'], index: 0, isDetail: false })}
+            >
+              <Text>
+                <Text>{' · '}</Text>
+                <Text color={one.tone}>{`CTX ${reading.text}`}</Text>
+              </Text>
+            </Button>
+          ) : (
+            <Text key={`stat-${one.key}`} color={one.tone}>{one.text}</Text>
+          ))}
         </Box>
         {rows < 20 ? null : (
           <Box flexDirection="row">
             <Text>{' '.repeat(SP.inline)}</Text>
-            <Button key="stat-tools" label={`工具 ${stats.toolKinds} 种 · ${stats.toolCalls} 次`} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.tools], index: 0, isDetail: false })}>
+            <Button
+              key="stat-tools"
+              label={columns < 40 ? `工具 ${stats.toolCalls} 次` : `工具 ${stats.toolKinds} 种 · ${stats.toolCalls} 次`}
+              plain
+              onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.tools], index: 0, isDetail: false })}
+            >
               <Text>
                 <Text color={INK.accent}>工具</Text>
-                <Text color={INK.muted}>{` ${stats.toolKinds} 种 · ${stats.toolCalls} 次`}</Text>
+                <Text color={INK.muted}>{columns < 40 ? ` ${stats.toolCalls} 次` : ` ${stats.toolKinds} 种 · ${stats.toolCalls} 次`}</Text>
               </Text>
             </Button>
-            <Text color={INK.frame}>{'  ·  '}</Text>
-            <Button key="stat-commands" label={`命令 ${stats.commandCalls} 次`} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.commands], index: 0, isDetail: false })}>
+            {columns < 56 ? null : (
+              <>
+                <Text color={INK.frame}>{'  ·  '}</Text>
+                <Button key="stat-commands" label={`命令 ${stats.commandCalls} 次`} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.commands], index: 0, isDetail: false })}>
+                  <Text>
+                    <Text color={INK.accent}>命令</Text>
+                    <Text color={INK.muted}>{` ${stats.commandCalls} 次`}</Text>
+                  </Text>
+                </Button>
+              </>
+            )}
+            {failures === 0 || columns < 40 ? null : (
+              <>
+                <Text color={INK.frame}>{'  ·  '}</Text>
+                <Button key="stat-failures" label={`失败 ${failures} 次`} plain onPress={() => void actions.navigate({ ...state, path: ['failures'], index: 0, isDetail: false })}>
+                  <Text>
+                    <Text color={INK.accent}>失败</Text>
+                    <Text color={INK.muted}>{` ${failures} 次`}</Text>
+                  </Text>
+                </Button>
+              </>
+            )}
+            <Text color={INK.frame}>{columns < 40 ? ' · ' : '  ·  '}</Text>
+            <Button
+              key="stat-mcp"
+              label={`MCP ${stored.calls.length} 次`}
+              plain
+              onPress={() => void actions.navigate({ ...state, path: ['mcp'], index: 0, isDetail: false })}
+            >
               <Text>
-                <Text color={INK.accent}>命令</Text>
-                <Text color={INK.muted}>{` ${stats.commandCalls} 次`}</Text>
+                <Text color={INK.accent}>MCP</Text>
+                <Text color={INK.muted}>{` ${stored.calls.length} 次`}</Text>
               </Text>
             </Button>
           </Box>
@@ -637,7 +903,8 @@ export async function drawPane(
     const cols = convColsOf(columns)
     const widths = widthsOf(cols, columns - SP.inline)
     const time = padCells(endClip(item.time ?? '', widths[2] ?? 5), widths[2] ?? 5)
-    const summary = endClip(item.summary ?? item.line, widths[3] ?? 1)
+    const hint = item.hint === undefined ? '' : ` · ${item.hint}`
+    const summary = endClip(item.summary ?? item.line, Math.max(1, (widths[3] ?? 1) - cellsOf(hint)))
     const gap = ' '.repeat(SP.group)
 
     return (
@@ -650,29 +917,55 @@ export async function drawPane(
             <Text color={item.tone}>{padCells(item.tag ?? '输入', tagWidth(columns))}</Text>
             <Text color={INK.muted}>{`${gap}${time}${gap}`}</Text>
             <Text bold={selected}>{summary}</Text>
+            {hint === '' ? null : <Text color={INK.muted}>{hint}</Text>}
           </Text>
         </Button>
       </Box>
     )
   }
 
-  /** One MCP server row. */
-  const mcpRow = (item: Item, at: number) => {
+  /** One roster row: status, type, task, parent, how long it ran, its tools. */
+  const agentRow = (item: Item, at: number) => {
     const selected = at === index
-    const tag = padCells(item.tag ?? 'MCP', tagWidth(columns))
-    const count = padCells(`${item.count ?? 0} 次`, 6)
-    const gap = ' '.repeat(SP.group)
+    const curW = selected ? cellsOf('▸ ') : 2
+    const tagW = tagWidth(columns)
+    const typeW = columns >= 40 ? 12 : 0
+    const parentW = columns >= 56 ? 14 : 0
+    const ageW = columns >= 48 ? 5 : 0
+    const tools = columns < 40 ? String(item.count ?? 0) : `${words.agent.tools} ${item.count ?? 0}`
+    const fixed =
+      SP.inline +
+      curW +
+      SP.group +
+      tagW +
+      SP.group +
+      (typeW === 0 ? 0 : typeW + SP.group) +
+      SP.group +
+      (parentW === 0 ? 0 : parentW + SP.group) +
+      (ageW === 0 ? 0 : ageW + SP.group) +
+      cellsOf(tools)
+    const descW = Math.max(1, columns - fixed)
+    const desc = padCells(endClip(item.summary ?? '', descW), descW)
+    const tagText = columns < 48 ? (item.tag ?? '').slice(0, 1) : (item.tag ?? '')
 
     return (
-      <Box key={`mcp-${item.id}`} flexDirection="row">
-        <Button key={`row-${item.id}`} plain label={item.line} onPress={() => void actions.navigate({ ...state, index: at, isDetail: true })}>
+      <Box key={`agent-${item.id}`} flexDirection="row">
+        <Button key={`row-${item.id}`} plain label={item.line} onPress={() => void actions.openAgent({ ...state, index: at, isDetail: true }, item.id)}>
           <Text wrap="truncate-end">
             <Text>{' '.repeat(SP.inline)}</Text>
             <Text color={selected ? INK.accent : undefined}>{selected ? '▸ ' : '  '}</Text>
-            <Text>{gap}</Text>
-            <Text color={item.tone}>{tag}</Text>
-            <Text color={INK.muted}>{`${gap}${count}${gap}`}</Text>
-            <Text bold={selected}>{item.name ?? item.line}</Text>
+            <Text>{' '.repeat(SP.group)}</Text>
+            <Text color={item.tone}>{padCells(endClip(tagText, tagW), tagW)}</Text>
+            <Text>{' '.repeat(SP.group)}</Text>
+            {typeW === 0 ? null : <Text>{padCells(endClip(item.name ?? '', typeW), typeW)}</Text>}
+            {typeW === 0 ? null : <Text>{' '.repeat(SP.group)}</Text>}
+            <Text bold={selected}>{desc}</Text>
+            <Text>{' '.repeat(SP.group)}</Text>
+            {parentW === 0 ? null : <Text color={INK.muted}>{padCells(endClip(item.repo ?? '—', parentW), parentW)}</Text>}
+            {parentW === 0 ? null : <Text>{' '.repeat(SP.group)}</Text>}
+            {ageW === 0 ? null : <Text color={INK.muted}>{padCells(item.age ?? '', ageW)}</Text>}
+            {ageW === 0 ? null : <Text>{' '.repeat(SP.group)}</Text>}
+            <Text color={INK.muted}>{tools}</Text>
           </Text>
         </Button>
       </Box>
@@ -788,10 +1081,189 @@ export async function drawPane(
     )
   }
 
-  // ------------------------------------------------------------- prompt shelf
+  /** One category of the context breakdown: name, tokens and share, in that order. */
+  const breakdownLine = (row: BreakdownRow, isTotal: boolean) => {
+    const tail = `${kmOf(row.tokens)} · ${row.percent}%`
+    const inner = Math.max(8, columns - SP.inline * 2)
+    const nameRoom = inner - cellsOf(tail) - SP.group
 
-  if (state.tab === 'other' && state.path[0] === 'prompts') {
+    // Too narrow for a name column: the name gets its own row(s), the figures the
+    // next. The name still wraps to the page — a long category never overflows.
+    if (nameRoom < 8) {
+      return (
+        <Box key={isTotal ? 'breakdown-total' : `breakdown-${row.label}`} flexDirection="column">
+          {wrapKeep(row.label, Math.max(8, columns - SP.inline), 0).map((line, at) => (
+            <Text key={`breakdown-${row.label}-${at}`}>{`${' '.repeat(SP.inline)}${line}`}</Text>
+          ))}
+          <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${tail}`}</Text>
+        </Box>
+      )
+    }
+
+    // A name longer than its column wraps, every character kept; the figures ride
+    // the first row so the reading stays one glance.
+    const lines = wrapKeep(row.label, nameRoom, 0)
+
+    return (
+      <Box key={isTotal ? 'breakdown-total' : `breakdown-${row.label}`} flexDirection="column">
+        {lines.map((line, at) => (
+          <Text key={`breakdown-${row.label}-${at}`}>
+            {`${' '.repeat(SP.inline)}${padCells(line, nameRoom)}${at === 0 ? tail : ' '.repeat(cellsOf(tail))}`}
+          </Text>
+        ))}
+      </Box>
+    )
+  }
+
+  /**
+   * The context window by category: a quiet page, largest category first, the total
+   * under a rule, and a refresh that re-reads only the breakdown.
+   */
+  const breakdownPage = () => {
+    const store = data.breakdown
+    const isMissing = store.error !== undefined || !store.isLoaded
+
+    return quietPage('上下文构成', (
+      <Box flexDirection="column">
+        {store.error !== undefined
+          ? noteAt(store.error)
+          : !store.isLoaded
+            ? noteAt('尚未读取构成，点「刷新」重试。')
+            : null}
+        {isMissing ? null : (
+          <>
+            {store.rows.map(row => breakdownLine(row, false))}
+            <Text color={INK.frame}>{ruleOf(columns)}</Text>
+            {breakdownLine({ label: '合计', tokens: store.total.tokens, percent: store.total.percent }, true)}
+          </>
+        )}
+        <Box flexDirection="row">
+          <Text>{' '.repeat(SP.inline)}</Text>
+          <Button key="breakdown-refresh" label="刷新" plain onPress={() => void actions.refreshBreakdown()}>
+            <Text color={INK.accent}>刷新</Text>
+          </Button>
+        </Box>
+      </Box>
+    ), {
+      aside: store.model ?? '',
+      onBack: () => actions.navigate({ ...state, path: [], index: 0, isDetail: false }),
+      isScrollable: store.rows.length + 3 > rows,
+    })
+  }
+
+  /** The four alert switches, reached from the more page. */
+  const soundsPage = () => {
+    const items = soundItemsOf(stored.sounds)
+
+    return quietPage('提示音', (
+      <Box flexDirection="column">
+        {items.map((item, at) => soundRow(item, at))}
+        <Text color={INK.frame}>{ruleOf(columns)}</Text>
+        <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${items.length} 项 · 点行开关 · 试听`}</Text>
+      </Box>
+    ), {
+      onBack: () => actions.navigate({ ...state, path: [], index: 0, isDetail: false }),
+      isScrollable: items.length + 2 > rows,
+    })
+  }
+
+  /** The editor choice, read from the plugin's config row; a choice is written back. */
+  const editorPage = () => {
+    const { current, options, error } = data.editor
+    const rowsOf = options.length === 0 ? [current] : options
+
+    return quietPage('编辑器', (
+      <Box flexDirection="column">
+        {noteAt('打开分支 diff 里的文件时使用；也可在 /config 修改。')}
+        {error === undefined ? null : noteAt(error)}
+        {rowsOf.map(option => {
+          const isOn = option === current
+
+          return (
+            <Box key={`editor-${option}`} flexDirection="row">
+              <Button key={`editor-option:${option}`} label={option} plain onPress={() => void actions.chooseEditor(option)}>
+                <Text wrap="truncate-end">
+                  <Text>{' '.repeat(SP.inline)}</Text>
+                  <Text color={isOn ? INK.accent : undefined}>{isOn ? '▸ ' : '  '}</Text>
+                  <Text bold={isOn}>{option}</Text>
+                </Text>
+              </Button>
+            </Box>
+          )
+        })}
+      </Box>
+    ), {
+      onBack: () => actions.navigate({ ...state, path: [], index: 0, isDetail: false }),
+      isScrollable: rowsOf.length + 2 > rows,
+    })
+  }
+
+  /** One MCP call's own page: its arguments and what it answered. */
+  const mcpCallPage = (server: string, callId: string) => {
+    const call = stored.calls.find(one => one.id === callId && one.server === server)
+
+    if (call === undefined) {
+      return quietPage(`${server} · 一次调用`, noteAt('这次调用已经不在了。'), {
+        onBack: () => actions.navigate({ ...state, path: state.path.slice(0, -1), index: 0, isDetail: false }),
+      })
+    }
+
+    const lines = [
+      `时间: ${whenOf(call.at)}`,
+      `结果: ${call.isOk ? '成功' : '失败'}`,
+      `耗时: ${call.ms >= 0 ? `${call.ms}ms` : '—'}`,
+      headLineOf('参数'),
+      ...(call.detail === '' ? ['（无）'] : call.detail.split('\n')),
+      headLineOf('结果'),
+      ...(call.result === '' ? ['（无）'] : call.result.split('\n')),
+    ]
+
+    return quietPage(`${server} · ${call.name}`, (
+      <Box flexDirection="column">
+        {lines.flatMap((line, at) => {
+          if (line.startsWith(SECTION_HEAD)) {
+            return [
+              <Text key={`mcp-call-head-${at}`} color={INK.accent} bold>{`${' '.repeat(SP.inline)}${line.slice(SECTION_HEAD.length)}`}</Text>,
+            ]
+          }
+
+          return sectionLine(line, Text, columns).map((one, k) => <Box key={`mcp-call-${at}-${k}`}>{one}</Box>)
+        })}
+      </Box>
+    ), {
+      tag: call.isOk ? '成功' : '失败',
+      tone: call.isOk ? 'success' : 'error',
+      aside: whenOf(call.at),
+      onBack: () => actions.navigate({ ...state, path: state.path.slice(0, -1), index: 0, isDetail: false }),
+      isScrollable: rowsIn(lines.join('\n'), Math.max(8, columns - SP.inline)) > rows,
+    })
+  }
+
+
+  // ------------------------------------------------------------------ more
+
+  if (state.tab === 'more' && state.path[0] === 'prompts') {
     return promptsPage()
+  }
+
+  if (state.tab === 'more' && state.path[0] === 'sounds') {
+    return soundsPage()
+  }
+
+  if (state.tab === 'more' && state.path[0] === 'editor') {
+    return editorPage()
+  }
+
+  // --------------------------------------------------------- context breakdown
+
+  if (state.tab === 'conversation' && state.path[0] === 'ctx') {
+    return breakdownPage()
+  }
+
+  // ------------------------------------------------------------- an MCP call
+
+  if (state.tab === 'conversation' && state.path[0] === 'mcp' && state.path.length === 3) {
+    return mcpCallPage(state.path[1] ?? '', state.path[2] ?? '')
   }
 
   // ---------------------------------------------------------------- file page
@@ -892,7 +1364,7 @@ export async function drawPane(
                 {countsText(Text, one)}
               </Text>
             </Button>
-            {editorOf(options) === '终端内' ? null : (
+            {data.editor.current === '终端内' ? null : (
               <Button
                 key={`edit-${one.rel}`}
                 label="打开"
@@ -962,11 +1434,11 @@ export async function drawPane(
               key={`drill-${item.id}`}
               plain
               label={item.line}
-              onPress={() => void actions.navigate({ ...state, index: row, path: [...state.path, item.id] })}
+              onPress={() => void actions.navigate({ ...state, index: row, path: [...state.path, item.pathKey ?? item.id] })}
             >
               <Text wrap="truncate-end">
                 <Text color={INK.accent}>{row === at ? '▸ ' : '  '}</Text>
-                <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${item.line}`}</Text>
+                <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${item.line}${item.hint === undefined ? '' : ` · ${item.hint}`}`}</Text>
               </Text>
             </Button>
           </Box>
@@ -1060,27 +1532,146 @@ export async function drawPane(
     })
   }
 
+  /**
+   * The change detail's next step: prefill a command or open a file. Nothing here
+   * submits, writes or archives; the person keeps the last word.
+   */
+  const nextActions = (change: SpecChange) => {
+    const closeout = closeoutOf(change)
+    const base = change.isArchived ? `openspec/changes/archive/${change.name}` : `openspec/changes/${change.name}`
+    const specFile = change.specFiles?.[0]
+    const opens = [
+      { key: 'tasks', label: 'tasks.md', rel: change.files.includes('tasks.md') ? `${base}/tasks.md` : undefined },
+      { key: 'proposal', label: 'proposal.md', rel: change.files.includes('proposal.md') ? `${base}/proposal.md` : undefined },
+      { key: 'specs', label: 'specs', rel: specFile === undefined ? undefined : `${base}/${specFile}` },
+    ]
+    const fileNode = (one: (typeof opens)[number]) => (
+      one.rel === undefined ? (
+        <Text key={`open-${one.key}`} color={INK.muted}>{`（无 ${one.label}）`}</Text>
+      ) : (
+        <Button key={`open-${one.key}`} label={one.label} plain onPress={() => void actions.showFile(change.repo, one.rel as string)}>
+          <Text color={INK.accent}>{one.label}</Text>
+        </Button>
+      )
+    )
+
+    return (
+      <Box flexDirection="column">
+        <Text color={INK.frame}>{ruleOf(columns)}</Text>
+        <Text color={INK.accent} bold>{`${' '.repeat(SP.inline)}下一步`}</Text>
+        <Box flexDirection="row">
+          <Text>{' '.repeat(SP.inline)}</Text>
+          <Button key="action-continue" label={`/opsx:apply ${change.name}`} plain onPress={() => void actions.fillPrompt(`/opsx:apply ${change.name}`)}>
+            <Text color={INK.accent}>继续</Text>
+          </Button>
+        </Box>
+        {closeout.isReady ? (
+          <Box flexDirection="row">
+            <Text>{' '.repeat(SP.inline)}</Text>
+            <Button key="action-archive" label={`/opsx:archive ${change.name}`} plain onPress={() => void actions.fillPrompt(`/opsx:archive ${change.name}`)}>
+              <Text color={INK.accent}>归档</Text>
+            </Button>
+          </Box>
+        ) : null}
+        {columns < 56 ? (
+          <Box flexDirection="column">
+            <Text color={INK.muted}>{`${' '.repeat(SP.inline)}打开`}</Text>
+            {opens.map(one => (
+              <Box key={`open-row-${one.key}`} flexDirection="row">
+                <Text>{' '.repeat(SP.inline * 2)}</Text>
+                {fileNode(one)}
+              </Box>
+            ))}
+          </Box>
+        ) : (
+          <Box flexDirection="row">
+            <Text color={INK.muted}>{`${' '.repeat(SP.inline)}打开  `}</Text>
+            {opens.map((one, at) => (
+              <Box key={`open-cell-${one.key}`} flexDirection="row">
+                {at === 0 ? null : <Text> </Text>}
+                {fileNode(one)}
+                {at === opens.length - 1 ? null : <Text> </Text>}
+              </Box>
+            ))}
+          </Box>
+        )}
+        {closeout.missing.length > 0 ? noteAt(`还差 ${closeout.missing.length} 项：${closeout.missing.join('、')}`) : null}
+        {change.isArchived ? noteAt('已归档。') : closeout.isReady ? noteAt('可以归档。') : null}
+      </Box>
+    )
+  }
+
+  // --------------------------------------------------------------- agent detail
+
+  if (state.tab === 'agent' && state.isDetail && open !== undefined) {
+    const agent = data.agents.find(one => one.id === open.id)
+
+    if (agent !== undefined) {
+      const excerpt = data.agentMessages.id === agent.id ? data.agentMessages : undefined
+      const ended = agent.endedAt ?? now
+      const last = agent.lastText.trim()
+      const fields = [
+        `${words.agent.type}: ${agent.type}`,
+        `${words.agent.parent}: ${agent.parentId ?? '—'}`,
+        `${words.agent.start}: ${whenOf(agent.startedAt)}`,
+        `${words.agent.end}: ${agent.endedAt === undefined ? '—' : whenOf(agent.endedAt)}`,
+        `${words.agent.tools}: ${agent.toolCalls}`,
+        `${words.agent.fails}: ${agent.toolFails}`,
+      ]
+
+      return quietPage(agent.description === '' ? agent.type : agent.description, (
+        <Box flexDirection="column">
+          {fields.map((line, at) => (
+            <Box key={`agent-field-${at}`}>{fieldLine(line, Text, columns)}</Box>
+          ))}
+          <Text color={INK.accent} bold>{`${' '.repeat(SP.inline)}${words.agent.lastText}`}</Text>
+          {noteAt(last === '' ? '（还没有输出）' : `${last.slice(0, 2000)}${last.length > 2000 ? '…' : ''}`)}
+          <Text color={INK.accent} bold>{`${' '.repeat(SP.inline)}${words.agent.excerpt}`}</Text>
+          {excerpt === undefined
+            ? noteAt('（进入详情时读取）')
+            : excerpt.error !== undefined
+              ? noteAt(excerpt.error)
+              : excerpt.lines.length === 0
+                ? noteAt('（没有可读的对话）')
+                : (
+                    <Box flexDirection="column">
+                      {excerpt.lines.map((line, at) => (
+                        <Text key={`agent-line-${at}`}>{`${' '.repeat(SP.inline)}${line}`}</Text>
+                      ))}
+                      {excerpt.isTruncated === true ? noteAt(words.agent.excerptTruncated) : null}
+                    </Box>
+                  )}
+        </Box>
+      ), {
+        tag: words.agent.status[agent.status],
+        tone: AGENT_TONE[agent.status],
+        aside: spanOf(Math.max(0, ended - agent.startedAt)),
+        onBack: () => actions.navigate({ ...state, isDetail: false, index: 0 }),
+        isScrollable: 6 + (excerpt?.lines.length ?? 0) > rows,
+      })
+    }
+  }
+
   // -------------------------------------------------------------- generic detail
 
   if (state.isDetail && open !== undefined) {
     const heading = open.name ?? open.detailLines[0] ?? '详情'
     const bodyLines = open.detailLines.slice(1)
-    const isMcp = state.tab === 'mcp'
+    const change = state.tab === 'spec' ? stored.changes.find(one => `${one.repo}/${one.name}` === open.id) : undefined
 
     return quietPage(heading, (
       <Box flexDirection="column" flexGrow={1}>
         {bodyLines.map((line, at) => (
-          isMcp
-            ? <Text key={`detail-${at}`} color={line.includes(' 失败 ') ? 'error' : INK.muted}>{`${' '.repeat(SP.inline)}${line}`}</Text>
-            : <Box key={`detail-${at}`}>{fieldLine(line, Text, columns)}</Box>
+          <Box key={`detail-${at}`}>{fieldLine(line, Text, columns)}</Box>
         ))}
+        {change === undefined ? null : nextActions(change)}
       </Box>
     ), {
       tag: open.tag,
       tone: open.tone,
       aside: open.done ?? (open.count === undefined ? open.last : `${open.count} 次`),
       onBack: () => actions.navigate({ ...state, isDetail: false }),
-      isScrollable: rowsIn(open.detailLines.join('\n'), Math.max(8, columns - SP.inline)) > rows,
+      isScrollable: rowsIn(open.detailLines.join('\n'), Math.max(8, columns - SP.inline)) + 6 > rows,
     })
   }
 
@@ -1089,41 +1680,40 @@ export async function drawPane(
   const shown = items.slice(0, room)
   const empty = isSpec && state.filter.status !== 'all' && all.length > 0
     ? `没有「${STATUS_TAG[state.filter.status].full}」状态的变更。`
-    : state.tab === 'openspec'
-      ? specEmptyOf(data.scanState)
-      : emptyOf(state.tab)
+    : isSpec
+      ? specEmptyOf(data.scanState, words)
+      : emptyOf(state.tab, words)
 
   const body = items.length === 0
     ? noteAt(empty)
-    : state.tab === 'openspec'
+    : isSpec
       ? <Box flexDirection="column">{shown.map((item, at) => listRow(item, at))}</Box>
       : state.tab === 'conversation'
         ? <Box flexDirection="column">{shown.map((item, at) => convRow(item, at))}</Box>
-        : state.tab === 'mcp'
-          ? <Box flexDirection="column">{shown.map((item, at) => mcpRow(item, at))}</Box>
-          : state.tab === 'other'
-            ? <Box flexDirection="column">{shown.map((item, at) => otherRow(item, at))}</Box>
-            : <Box flexDirection="column">{shown.map((item, at) => soundRow(item, at))}</Box>
+        : state.tab === 'agent'
+          ? <Box flexDirection="column">{shown.map((item, at) => agentRow(item, at))}</Box>
+          : <Box flexDirection="column">{shown.map((item, at) => moreRow(item, at))}</Box>
 
   const foot = isSpec
     ? `${shown.length}/${items.length} 项 · 点行看详情`
-    : state.tab === 'sounds'
-      ? `${items.length} 项 · 点行开关 · 试听`
-      : state.tab === 'other'
+    : state.tab === 'agent'
+      ? items.length === 0 ? words.agent.empty : `${items.length} 项 · 点行看详情`
+      : state.tab === 'more'
         ? `${items.length} 项 · 点行进入`
         : `${items.length} 项 · 点行看详情`
   const keys = columns < 40
-    ? '1–5'
+    ? words.tabKeysShort
     : isSpec
-      ? '1–5 页签 · 点状态筛选'
-      : '1–5 页签'
+      ? `${words.tabKeys} · 点状态筛选`
+      : words.tabKeys
 
   const rail = isSpec ? (
     <Box flexDirection="column">
       {statusRail()}
+      {closeoutRail()}
       {secondaryFilter()}
     </Box>
-  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'mcp' ? plainRail(`服务器 ${items.length} 个`) : state.tab === 'other' ? plainRail(`功能 ${items.length} 个`) : plainRail(`开关 ${items.length} 项 · 点行切换 · 试听`)
+  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'agent' ? plainRail(`${words.agent.rail} ${items.length}`) : plainRail(`功能 ${items.length} 个`)
 
   return listPage(rail, body, foot, keys)
 }
@@ -1266,13 +1856,16 @@ function fieldLine(line: string, Text: RenderKit['Text'], room: number): RenderE
   const label = line.slice(0, colon)
   const valueRoom = Math.max(8, room - SP.inline - labelWidth)
   const value = wrapCells(line.slice(colon + 1).trim(), valueRoom)
+  const mark = value.length > 1 ? `  （共 ${value.length} 行）` : ''
 
   return value.map((one, at) => (
     <Text key={`field-${at}`}>
       <Text>{' '.repeat(SP.inline)}</Text>
       <Text color={INK.muted}>{at === 0 ? padCells(label, labelWidth) : ' '.repeat(labelWidth)}</Text>
       <Text>{one}</Text>
-      {value.length > 1 && at === value.length - 1 ? <Text dimColor>{`  （共 ${value.length} 行）`}</Text> : null}
+      {mark !== '' && at === value.length - 1 && SP.inline + labelWidth + cellsOf(one) + cellsOf(mark) <= room
+        ? <Text dimColor>{mark}</Text>
+        : null}
     </Text>
   ))
 }
@@ -1423,36 +2016,32 @@ export function clampOf(at: number, length: number): number {
  * not look" are different answers, and only one is the person's cue to check
  * their folder.
  */
-export function specEmptyOf(state: ScanState): string {
+export function specEmptyOf(state: ScanState, words = stringsOf('zh')): string {
   if (state.isStale) {
-    return '（刷新失败，显示上次结果）'
+    return words.scan.stale
   }
 
   if (state.kind === 'skipped') {
-    return `未扫描任何仓库：${state.why}`
+    return words.scan.skipped(state.why)
   }
 
-  return '还没有读到任何 openspec/changes。'
+  return state.kind === 'none' ? words.empty.specNoOpenSpec : words.empty.specNoChanges
 }
 
-export function emptyOf(tab: TabId): string {
-  if (tab === 'openspec') {
-    return '还没有读到任何 openspec/changes。'
+export function emptyOf(tab: TabId, words = stringsOf('zh')): string {
+  if (tab === 'spec') {
+    return words.empty.specNoChanges
   }
 
   if (tab === 'conversation') {
-    return '本会话还没有对话。你提交输入、或 AI 发起提问后，这里会出现一轮记录。'
+    return words.empty.conversation
   }
 
-  if (tab === 'mcp') {
-    return '本会话还没有调用 MCP 工具。'
+  if (tab === 'agent') {
+    return words.agent.empty
   }
 
-  if (tab === 'other') {
-    return '这里还没有功能。'
-  }
-
-  return '提示音开关没有读到；按 4 可重新查看。'
+  return words.empty.more
 }
 
 /** A clip plays where the store says it may; one that cannot play is one to lose quietly. */

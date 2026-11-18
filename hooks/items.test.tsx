@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Call, SoundSettings, SpecChange } from '../types'
-import { DETAIL_BUDGET, itemsOf, takeRows } from './items'
+import { DETAIL_BUDGET, closeoutTallyOf, drillItemsOf, itemsOf, takeRows } from './items'
 
 const sounds: SoundSettings = { isOn: true, decision: true, done: true, error: true }
 
@@ -60,7 +60,7 @@ test('a change detail shows every open task, or says how many it left', () => {
     authors: [],
     open,
   }
-  const detail = itemsOf('openspec', { changes: [change], turns: [], calls: [], sounds })[0]?.detailLines ?? []
+  const detail = itemsOf('spec', { changes: [change], turns: [], calls: [], sounds })[0]?.detailLines ?? []
 
   expect(detail[0]).toBe('long-change')
   expect(detail).toContain('未完成 1000 项：')
@@ -69,7 +69,7 @@ test('a change detail shows every open task, or says how many it left', () => {
   expect(detail.some(line => line.includes('x'.repeat(200)))).toBe(true)
 })
 
-test('an MCP detail stops at the budget and says how many calls it left', () => {
+test('an MCP server lists every call, newest first, under its own name', () => {
   const calls: Call[] = Array.from({ length: 100 }, (_, at) => ({
     id: `c${at}`,
     tool: 'mcp__srv__tool',
@@ -82,8 +82,41 @@ test('an MCP detail stops at the budget and says how many calls it left', () => 
     isOk: true,
     result: '',
   }))
-  const detail = itemsOf('mcp', { changes: [], turns: [], calls, sounds })[0]?.detailLines ?? []
+  const drill = drillItemsOf('conversation', { changes: [], turns: [], calls, sounds }, ['mcp', 'srv'])
 
-  expect(detail[0]).toContain('srv（100 次）')
-  expect(detail.some(line => line.includes('次调用未显示（达到显示上限）'))).toBe(true)
+  expect(drill.title).toBe('srv · 100 次')
+  expect(drill.items).toHaveLength(100)
+  // Newest first: the last call made leads the list.
+  expect(drill.items[0]?.id).toBe('mcp:srv:c99')
+})
+
+test('the closeout tally counts the four buckets, with a week as the stale line', () => {
+  const now = 1_700_000_000_000
+  const week = 7 * 24 * 60 * 60 * 1000
+  const make = (name: string, over: Partial<SpecChange>) => ({
+    name,
+    repo: 'app',
+    done: 1,
+    total: 2,
+    hasTasks: true,
+    files: ['tasks.md', 'proposal.md', 'specs'],
+    mtime: now,
+    isArchived: false,
+    needNo: '',
+    archivedOn: '',
+    authors: [],
+    open: [],
+    ...over,
+  })
+
+  const tally = closeoutTallyOf([
+    make('doing', {}),
+    make('ready', { done: 2, total: 2 }),
+    make('broken', { done: 1, total: 2, isArchived: true }),
+    make('stale', { mtime: now - week - 1 }),
+    make('edge', { mtime: now - week }),
+    make('archived-clean', { done: 2, total: 2, isArchived: true }),
+  ], now)
+
+  expect(tally).toEqual({ doing: 3, ready: 1, broken: 1, stale: 1 })
 })

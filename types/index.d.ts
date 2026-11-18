@@ -17,8 +17,10 @@ export type SpecChange = {
   total: number
   /** Where the progress last came from, for a change whose tasks.md is absent. */
   hasTasks: boolean
-  /** Files present beside it, to say what there is to read. */
+  /** Files and folders present beside it, to say what there is to read. */
   files: string[]
+  /** Spec files under `specs/`, relative to the change folder; empty when none. */
+  specFiles?: string[]
   /** Last modification among its files, in epoch ms. */
   mtime: number
   /** Read from `changes/archive/` rather than `changes/` itself. */
@@ -92,6 +94,8 @@ export type ToolNote = {
   ms: number
   /** Answered without error. */
   isOk: boolean
+  /** Refused by a permission check or a deny, rather than reported as an error. */
+  isDenied?: boolean
   /** One line: a Bash command, a Skill's name, otherwise the tool and its first argument. */
   summary: string
   /** The whole of what was asked, cut at 2 000 characters. */
@@ -144,6 +148,49 @@ export type Branch = {
   changes: number
 }
 
+/** What the session has spent, and how much of each quota window it has used. */
+export type Meter = {
+  /** US dollars the session has cost, as the engine's ledger totals it; absent where the host keeps none. */
+  usd?: number
+  /** The rate-limit windows the last response reported; empty before any reading. */
+  rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[]
+}
+
+/** Where one agent's own loop stands. */
+export type AgentStatus = 'pending' | 'running' | 'waiting' | 'idle' | 'completed' | 'failed' | 'killed'
+
+/** One subagent or teammate, as the roster keeps it for this session. */
+export type AgentRow = {
+  id: string
+  teammateId?: string
+  /** The agent type it was spawned as (`Explore`, `general-purpose`, ...). */
+  type: string
+  /** The Agent call's short description of the task. */
+  description: string
+  /** The agent whose loop spawned it; absent on a spawn from the main loop. */
+  parentId?: string
+  status: AgentStatus
+  startedAt: number
+  endedAt?: number
+  toolCalls: number
+  toolFails: number
+  /** The agent's final visible text, once it settled. */
+  lastText: string
+}
+
+/** One category of the context window, as the breakdown page lists it. */
+export type BreakdownRow = { label: string; tokens: number; percent: number }
+
+/** The context window split by category, with its total and the model measured. */
+export type Breakdown = {
+  rows: BreakdownRow[]
+  total: { tokens: number; percent: number }
+  model?: string
+}
+
+/** What the pane reads for the breakdown page: the reading, or why there is none. */
+export type BreakdownStore = Breakdown & { isLoaded: boolean; error?: string }
+
 /** Which alerts sound, and how. */
 export type SoundSettings = {
   isOn: boolean
@@ -152,11 +199,15 @@ export type SoundSettings = {
   error: boolean
 }
 
-/** One saved prompt: its whole text, how often it was copied, and when it was added. */
+/** One saved prompt: its whole text, how often it was copied and launched, and when it was added. */
 export type Prompt = {
   id: string
   text: string
   copies: number
+  /** How many times it was put into the prompt box. */
+  launches: number
+  /** Which file holds it: the person's global shelf, or this project's. */
+  scope: 'global' | 'project'
   createdAt: number
 }
 
@@ -172,6 +223,18 @@ declare module 'claude-code' {
       /** The live context window's fill, as the engine last measured it: the model's
        * window, and the input side of the last response once one has come back. */
       ctx: Shaped<{ tokens?: number; window: number }>
+      /** The session's cost and the quota windows the last response reported. */
+      meter: Shaped<Meter>
+      /** The context window by category, read on demand for the breakdown page. */
+      breakdown: Shaped<BreakdownStore>
+      /** The editor files open in, and the choices the plugin's config row offers. */
+      editor: Shaped<{ current: string; options: string[]; error?: string }>
+      /** The subagents and teammates this session has seen, in roster order. */
+      agents: Shaped<{ list: AgentRow[] }>
+      /** The language the panel speaks, from `LANG`. */
+      lang: Shaped<'zh' | 'en'>
+      /** The transcript excerpt read for one agent's detail page. */
+      agentMessages: Shaped<{ id: string; lines: string[]; isTruncated?: boolean; error?: string }>
       /** The saved prompts in display order, and why the file could not be read. */
       prompts: Shaped<{ list: Prompt[]; error?: string }>
       sounds: Shaped<SoundSettings>

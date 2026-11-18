@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, RenderSurface } from 'claude-code'
 
-import type { Branch, Call, ScanState, SoundSettings, SpecChange, Turn } from '../types'
+import type { AgentRow, Branch, Call, Meter, ScanState, SoundSettings, SpecChange, Turn } from '../types'
+import { closeAgent, reconcileAgents, tallyAgentTool, upsertAgent } from './agents'
 import {
   NOISE_PROMPT,
   attachTool,
@@ -16,9 +17,11 @@ import {
 import { editorOf, editFile, openDiff, openFile, readTextOf, rootOf, type DiffShown, type FileShown } from './files'
 import { capMark, capText, cellsOf, ctxOf } from './format'
 import { NO_FILTER } from './items'
-import { drawPane, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
+import { breakdownOf, NO_BREAKDOWN, type BreakdownStore } from './meter'
+import { drawPane, migrateView, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
 import {
   addPrompt,
+  bumpLaunch,
   bumpPrompt,
   firstLineOf,
   parsePrompts,
@@ -28,6 +31,8 @@ import {
   type Prompt,
 } from './prompts'
 import { branchesOf, rememberStartCwd, scan, type ScanOutcome } from './scan'
+import { reportOf } from './report'
+import { langOf, stringsOf } from './strings'
 
 const PANE = 'bench'
 const TITLE = '开发者工作台'
@@ -50,7 +55,7 @@ const SPEC_POLL_MS = 5_000
 const view = atom(
   { plugin: 'bench', key: 'view' } as const,
   {
-    tab: 'openspec',
+    tab: 'spec',
     index: 0,
     isDetail: false,
     fullSection: null,
@@ -83,6 +88,31 @@ const branches = atom({ plugin: 'bench', key: 'branches' } as const, [] as Branc
  * turn and read once at the start. The pane and the band only read this; nothing
  * here derives it from turn usage, which the engine reports summed. */
 const ctx = atom({ plugin: 'bench', key: 'ctx' } as const, { window: 0 } as ContextFill, { shape: 'ctx-1' })
+/** The session's own ledger and quota windows: one `$.session.usage()` read writes
+ * this and the context fill together, so the two never come from different moments. */
+const meter = atom({ plugin: 'bench', key: 'meter' } as const, { rateLimits: [] } as Meter, { shape: 'meter-1' })
+/** The context window by category, read on demand for the breakdown page. */
+const breakdown = atom({ plugin: 'bench', key: 'breakdown' } as const, NO_BREAKDOWN as BreakdownStore, {
+  shape: 'breakdown-1',
+})
+/** The editor files open in, and the choices the plugin's config row offers. */
+const editor = atom(
+  { plugin: 'bench', key: 'editor' } as const,
+  { current: '终端内', options: [] } as { current: string; options: string[]; error?: string },
+  { shape: 'editor-1' },
+)
+/** The session's subagents and teammates, one row each. */
+const agents = atom({ plugin: 'bench', key: 'agents' } as const, { list: [] } as { list: AgentRow[] }, {
+  shape: 'agents-1',
+})
+/** The language the panel speaks, read from `LANG` at the session's start. */
+const lang = atom({ plugin: 'bench', key: 'lang' } as const, 'zh' as 'zh' | 'en', { shape: 'lang-1' })
+/** The transcript read for one agent's detail page, kept apart from the roster. */
+const agentMessages = atom(
+  { plugin: 'bench', key: 'agentMessages' } as const,
+  { id: '', lines: [] } as { id: string; lines: string[]; isTruncated?: boolean; error?: string },
+  { shape: 'agent-msg-1' },
+)
 /** The saved prompts, in display order, and why the file could not be read. */
 const prompts = atom({ plugin: 'bench', key: 'prompts' } as const, { list: [] } as PromptStore, { shape: 'prompts-1' })
 const diff = atom({ plugin: 'bench', key: 'diff' } as const, null as DiffShown | null, { shape: 'diff-3' })
@@ -217,54 +247,195 @@ async function rememberCtx($: EngineInterface, context: ContextFill): Promise<vo
   )
 }
 
-/** One read of the engine's own figures; a host that cannot answer keeps the last one. */
-async function refreshCtx($: EngineInterface): Promise<void> {
-  let usage: { context: ContextFill } | null = null
+/** The ledger and the quota windows, written only when they moved. A host without
+ * a ledger leaves `usd` undefined; a host with no reading leaves the windows empty. */
+async function rememberMeter($: EngineInterface, next: Meter): Promise<void> {
+  const before = await read($, meter)
 
-  try {
-    usage = await $.session.usage()
-  } catch {
-    usage = null
+  if (before.usd === next.usd && JSON.stringify(before.rateLimits) === JSON.stringify(next.rateLimits)) {
+    return
   }
 
-  if (usage !== null) {
-    await rememberCtx($, usage.context)
-  }
+  await update($, meter, () => next)
 }
 
-const PROMPT_FILE = '.claude/bench-prompts.json'
+/** One read of the engine's own figures, or the event's own reading where it carries
+ * one; a host that cannot answer keeps the last one. */
+async function refreshUsage(
+  $: EngineInterface,
+  reading?: { context: ContextFill; rateLimits?: Meter['rateLimits']; cost?: { usd: number } },
+): Promise<void> {
+  let usage = reading ?? null
 
-/** Where the person's prompts live, or null where this host names no home. */
-async function promptFileOf($: EngineInterface): Promise<string | null> {
-  const home = await $.env.get('HOME').catch(() => undefined)
-
-  return home === undefined || home === '' ? null : `${home}/${PROMPT_FILE}`
-}
-
-/** The whole small file, rewritten on every change. */
-async function savePrompts($: EngineInterface, list: Prompt[]): Promise<void> {
-  const path = await promptFileOf($)
-
-  if (path === null) {
-    throw new Error('HOME 未设置')
+  if (usage === null) {
+    try {
+      usage = await $.session.usage()
+    } catch {
+      usage = null
+    }
   }
 
-  await $.fs.write(path, serializePrompts(list))
+  if (usage === null) {
+    return
+  }
+
+  await rememberCtx($, usage.context)
+  await rememberMeter($, { usd: usage.cost?.usd, rateLimits: usage.rateLimits ?? [] })
 }
 
 /**
- * The file as the shelf: a missing one is an empty shelf, a broken one is an
- * empty shelf that says why — and is left untouched until the next real write.
- *
- * The file is asked every time, never the session's copy of it alone: a `/clear`
- * ends the session and starts another with no `session.start` after it, so the
- * state the first session read is gone while the file still holds every prompt.
+ * One read of the context window by category, for the breakdown page. `summary`
+ * counts locally and sends no token-count request; a reading without a breakdown
+ * is said so, not drawn as an empty table.
+ */async function loadBreakdown($: EngineInterface): Promise<void> {
+  let usage: { context: { breakdown?: Parameters<typeof breakdownOf>[0] } } | null = null
+
+  try {
+    usage = await $.session.usage({ breakdown: 'summary' })
+  } catch (thrown) {
+    const why = String(thrown instanceof Error ? thrown.message : thrown)
+
+    await update($, breakdown, () => ({ ...NO_BREAKDOWN, isLoaded: true, error: `读取失败：${why}` }))
+
+    return
+  }
+
+  const built = breakdownOf(usage.context.breakdown)
+
+  await update($, breakdown, () =>
+    built === undefined
+      ? { ...NO_BREAKDOWN, isLoaded: true, error: '引擎未提供构成' }
+      : { ...built, isLoaded: true },
+  )
+}
+
+/** How many transcript lines one agent's detail keeps: enough to see its shape. */
+const AGENT_EXCERPT_LINES = 40
+
+/**
+ * One agent's transcript, read on demand for its detail page: the last lines,
+ * cut short and marked, or the engine's own refusal when it will not hand them
+ * over. A reading failure never touches the agent itself.
  */
-async function readShelf($: EngineInterface): Promise<PromptStore> {
-  const path = await promptFileOf($)
+async function loadAgentMessages($: EngineInterface, id: string): Promise<void> {
+  try {
+    const result = await $.session.messages({ agentId: id })
+
+    if (!Array.isArray(result)) {
+      await update($, agentMessages, () => ({ id, lines: [], error: '无法读取该代理的对话' }))
+
+      return
+    }
+
+    const lines = result
+      .map(one => `${one.role === 'user' ? '你' : '代理'}：${one.text.replace(/\s+/g, ' ').trim()}`)
+      .filter(one => !one.endsWith('：'))
+    const kept = lines.slice(-AGENT_EXCERPT_LINES).map(one => (one.length > 200 ? `${one.slice(0, 200)}…` : one))
+
+    await update($, agentMessages, () => ({
+      id,
+      lines: kept,
+      ...(lines.length > kept.length ? { isTruncated: true } : {}),
+    }))
+  } catch (thrown) {
+    await update($, agentMessages, () => ({
+      id,
+      lines: [],
+      error: `无法读取该代理的对话：${String(thrown instanceof Error ? thrown.message : thrown)}`,
+    }))
+  }
+}
+
+/** `YYYYMMDD-HHmm`, the stamp a report's file name carries. */
+function stampOf(ms: number): string {
+  const at = new Date(ms)
+  const two = (value: number) => String(value).padStart(2, '0')
+
+  return `${at.getFullYear()}${two(at.getMonth() + 1)}${two(at.getDate())}-${two(at.getHours())}${two(at.getMinutes())}`
+}
+
+/** A report path that does not overwrite an earlier export: `-2`, `-3`, ... */
+async function reportPathOf($: EngineInterface, root: string, now: number): Promise<string> {
+  const base = `bench-report-${stampOf(now)}`
+  let path = `${root}/${base}.md`
+
+  for (let at = 2; ; at += 1) {
+    // Only a file the engine actually names holds the name; a `deny` is a clear path.
+    const held = await $.fs.stat(path).catch(() => null)
+
+    if (held === null || 'deny' in held) {
+      return path
+    }
+
+    path = `${root}/${base}-${at}.md`
+  }
+}
+
+/** The editor choices the plugin's config row declares; a host that cannot list
+ * them keeps the current value and says why the list is empty. */async function readEditorChoices($: EngineInterface): Promise<{ options: string[]; error?: string }> {
+  try {
+    const rows = await $.config.list()
+    const row = rows.find(one => one.key === 'bench.editor')
+
+    return {
+      options: row?.options === undefined ? [] : [...row.options],
+      ...(row?.isLocked === true ? { error: '该选项由组织策略锁定，不能在面板里修改' } : {}),
+    }
+  } catch (thrown) {
+    return { options: [], error: `读取编辑器选项失败：${String(thrown instanceof Error ? thrown.message : thrown)}` }
+  }
+}
+
+/** The editor at a session's start: the configured value and its choices. */
+async function resetEditor($: EngineInterface, options: PluginOptions): Promise<void> {
+  const { options: choices, error } = await readEditorChoices($)
+
+  await update($, editor, () => ({
+    current: editorOf(options),
+    options: choices,
+    ...(error === undefined ? {} : { error }),
+  }))
+}
+
+/** The choices alone, for a visit to the editor page: a choice made here stands. */
+async function refreshEditor($: EngineInterface): Promise<void> {
+  const { options: choices, error } = await readEditorChoices($)
+  const before = await read($, editor)
+
+  await update($, editor, () => ({
+    current: before.current,
+    options: choices,
+    ...(error === undefined ? {} : { error }),
+  }))
+}
+
+const GLOBAL_FILE = '.claude/bench-prompts.json'
+const PROJECT_FILE = '.bench/prompts.json'
+
+type PromptScope = 'global' | 'project'
+
+/** Where one shelf lives, or null where the host names no such place. */
+async function promptFileOf($: EngineInterface, scope: PromptScope): Promise<string | null> {
+  if (scope === 'project') {
+    const root = await $.session.root().catch(() => undefined)
+
+    return root === undefined || root === '' ? null : `${root}/${PROJECT_FILE}`
+  }
+
+  const home = await $.env.get('HOME').catch(() => undefined)
+
+  return home === undefined || home === '' ? null : `${home}/${GLOBAL_FILE}`
+}
+
+/** One shelf's own file, read fresh: a copy or delete must land on what is there now. */
+type ShelfPart = { list: Prompt[]; error?: string }
+
+async function readPart($: EngineInterface, scope: PromptScope): Promise<ShelfPart> {
+  const label = scope === 'global' ? '全局' : '项目'
+  const path = await promptFileOf($, scope)
 
   if (path === null) {
-    return { list: [], error: 'HOME 未设置，收藏无法读写' }
+    return { list: [], error: scope === 'global' ? 'HOME 未设置，全局收藏无法读写' : '会话目录未知，项目收藏无法读写' }
   }
 
   let text: string
@@ -273,9 +444,8 @@ async function readShelf($: EngineInterface): Promise<PromptStore> {
     text = await $.fs.read(path)
   } catch (thrown) {
     const why = String(thrown instanceof Error ? thrown.message : thrown)
-    const isMissing = /ENOENT|no such file/i.test(why)
 
-    return isMissing ? { list: [] } : { list: [], error: `读取失败：${why}` }
+    return /ENOENT|no such file/i.test(why) ? { list: [] } : { list: [], error: `${label}收藏读取失败：${why}` }
   }
 
   let raw: unknown = null
@@ -287,15 +457,35 @@ async function readShelf($: EngineInterface): Promise<PromptStore> {
   }
 
   if (raw === null || typeof raw !== 'object' || !Array.isArray((raw as { prompts?: unknown }).prompts)) {
-    return { list: [], error: '读取失败：收藏文件格式不对' }
+    return { list: [], error: `${label}收藏读取失败：文件格式不对` }
   }
 
   const parsed = parsePrompts(text)
   const rawPrompts = (raw as { prompts: unknown[] }).prompts
+  // The file's own shelf wins over anything an entry says about its scope.
+  const list = parsed.map(one => ({ ...one, scope }))
 
   return parsed.length === rawPrompts.length
-    ? { list: sortPrompts(parsed) }
-    : { list: sortPrompts(parsed), error: '读取失败：部分条目已损坏' }
+    ? { list }
+    : { list, error: `${label}收藏读取失败：部分条目已损坏` }
+}
+
+/**
+ * Both shelves as one list: the global file and the project's, merged and sorted.
+ * One unread shelf never hides the other; the page says which file failed.
+ *
+ * The files are asked every time, never the session's copy alone: a `/clear`
+ * ends the session and starts another with no `session.start` after it, so the
+ * state the first session read is gone while the files still hold every prompt.
+ */
+async function readShelf($: EngineInterface): Promise<PromptStore> {
+  const [global, project] = await Promise.all([readPart($, 'global'), readPart($, 'project')])
+  const errors = [global.error, project.error].filter((one): one is string => one !== undefined)
+
+  return {
+    list: sortPrompts([...global.list, ...project.list]),
+    ...(errors.length === 0 ? {} : { error: errors.join('；') }),
+  }
 }
 
 /** The shelf at the session's start: what the pane draws before anyone asks for it. */
@@ -306,16 +496,30 @@ async function loadPrompts($: EngineInterface): Promise<void> {
 }
 
 /**
- * The shelf a write starts from: the file where it reads, else the shelf this
- * session already drew, so a copy or a delete still lands while the file cannot
- * be read — and the next real write replaces the file it could not read.
+ * The list a write starts from on one shelf: the file where it reads, else what
+ * this session already drew for that scope, so a copy or delete still lands while
+ * the file cannot be read — and the next real write replaces what it could not read.
  */
-async function writeShelf($: EngineInterface): Promise<PromptStore> {
-  const shelf = await readShelf($)
+async function scopeListOf($: EngineInterface, scope: PromptScope): Promise<Prompt[]> {
+  const part = await readPart($, scope)
 
-  return shelf.error === undefined ? shelf : await read($, prompts)
+  if (part.error === undefined) {
+    return part.list
+  }
+
+  return (await read($, prompts)).list.filter(one => one.scope === scope)
 }
 
+/** The whole small file, rewritten on every change; only its own shelf's entries. */
+async function savePrompts($: EngineInterface, list: Prompt[], scope: PromptScope): Promise<void> {
+  const path = await promptFileOf($, scope)
+
+  if (path === null) {
+    throw new Error(scope === 'global' ? 'HOME 未设置' : '会话目录未知')
+  }
+
+  await $.fs.write(path, serializePrompts(list))
+}
 
 /** One prompt change at a time: the command and a press must not read the same list. */
 let promptLock: Promise<unknown> = Promise.resolve()
@@ -331,6 +535,7 @@ function withPrompts<T>(run: () => Promise<T>): Promise<T> {
 /** Adds one other-tab command beside the pane's own. */
 async function registerCommands($: EngineInterface): Promise<void> {
   await $.command.register({ name: 'panel-prompt-add', description: '收藏一条常用 prompt', argumentHint: '<文本>' })
+  await $.command.register({ name: 'panel-export', description: '导出本会话 Markdown 报告' })
 }
 
 
@@ -360,7 +565,21 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'panel', description: TITLE })
     await registerCommands($)
     await loadPrompts($)
-    await refreshCtx($)
+    await refreshUsage($)
+
+    // A page restored from an older build still names one of its five tabs; move
+    // it onto today's four before anything draws.
+    const restored = (await read($, view)) as PaneState
+    const migrated = migrateView(restored)
+
+    if (migrated !== restored) {
+      await update($, view, () => migrated)
+    }
+
+    await resetEditor($, options)
+
+    const language = langOf(await $.env.get('LANG').catch(() => undefined))
+    await update($, lang, () => language)
 
     // The engine itself says why a pane waits: a floor it fell under, or a surface
     // that places none. Guessing at the width hid the real cause once already.
@@ -385,7 +604,7 @@ export const register: Register = (on, options) => {
   // The engine's own measurement: the only push the context window has. A turn's
   // usage is summed across its requests, so it is never read as the window's fill.
   on('session.measure', async ($, e, next) => {
-    await rememberCtx($, e.context)
+    await refreshUsage($, e)
 
     return next(e)
   })
@@ -394,38 +613,69 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: TITLE, focus: true })
     // The stretch the person last looked at is theirs to keep: only the page and the
     // row reset, so a panel reopened answers where it was left.
-    await update($, view, prev => ({ ...prev, tab: 'openspec', index: 0, isDetail: false, fullSection: null }))
+    await update($, view, prev => ({ ...prev, tab: 'spec', index: 0, isDetail: false, fullSection: null }))
 
     return { text: `${TITLE}已打开。` }
   })
 
   // The one way a prompt is added: a command, so it works with the pane closed.
-  // The text is a single line, trimmed; the same words are kept once.
+  // The text is a single line, trimmed; `--project` puts it on the project shelf.
   on('command.run', { command: 'panel-prompt-add' }, async ($, e) =>
     withPrompts(async () => {
-      const text = String(e.args ?? '').trim()
+      const raw = String(e.args ?? '').trim()
+      const isProject = /^--project(?:\s+|$)/.test(raw)
+      const text = raw.replace(/^--project(?:\s+|$)/, '').trim()
 
       if (text === '') {
-        return { text: '用法：/panel-prompt-add <单行文本>' }
+        return { text: '用法：/panel-prompt-add [--project] <单行文本>' }
       }
 
-      const current = await writeShelf($)
-      const { list, isAdded } = addPrompt(current.list, text, await $.clock.now())
+      const scope: PromptScope = isProject ? 'project' : 'global'
+      const current = await scopeListOf($, scope)
+      const { list, isAdded } = addPrompt(current, text, await $.clock.now(), scope)
 
       if (!isAdded) {
         return { text: `已存在：${firstLineOf(text)}` }
       }
 
       try {
-        await savePrompts($, list)
+        await savePrompts($, list, scope)
       } catch {
-        return { text: '保存失败：无法写入 ~/.claude/bench-prompts.json' }
+        return { text: `保存失败：无法写入${scope === 'project' ? '项目 .bench/prompts.json' : ' ~/.claude/bench-prompts.json'}` }
       }
 
-      await update($, prompts, () => ({ list }))
+      await loadPrompts($)
 
-      return { text: `已收藏：${firstLineOf(text)}` }
+      return { text: `已收藏${scope === 'project' ? '（项目）' : ''}：${firstLineOf(text)}` }
     }))
+
+  // One Markdown report of the session, written beside the project: no network,
+  // no model call, and a name that never overwrites an earlier export.
+  on('command.run', { command: 'panel-export' }, async $ => {
+    const words = stringsOf(await read($, lang))
+
+    try {
+      const root = await $.session.root()
+      const now = await $.clock.now()
+      const usage = await $.session.usage().catch(() => null)
+      const path = await reportPathOf($, root, now)
+      const text = reportOf({
+        project: root.split('/').filter(one => one !== '').pop() ?? root,
+        startedAt: usage?.startedAt ?? now,
+        now,
+        turns: await read($, turns),
+        usd: (await read($, meter)).usd,
+        ctx: await read($, ctx),
+        changes: await read($, changes),
+      })
+
+      await $.fs.write(path, text)
+
+      return { text: `${words.exportReport.done(path)}\n${words.exportReport.sensitive}` }
+    } catch (thrown) {
+      return { text: words.exportReport.failed(String(thrown instanceof Error ? thrown.message : thrown)) }
+    }
+  })
 
   // A turn the person did not type (a continuation) still opens a round, so its
   // tools and answer have somewhere to go; a subagent's turn is not the person's.
@@ -438,6 +688,32 @@ export const register: Register = (on, options) => {
           ? startTurn(list, { id: String(e.turnId), kind: 'continuation', at, text: String(e.text ?? '') })
           : list,
       )
+    } else {
+      // A subagent's loop started (or resumed) a round: its row is running.
+      const id = String(e.agentId)
+      const at = await $.clock.now()
+
+      await update($, agents, prev => ({
+        list: prev.list.some(one => one.id === id)
+          ? prev.list.map(one =>
+              one.id === id && !['completed', 'failed', 'killed'].includes(one.status)
+                ? { ...one, status: 'running' as const, startedAt: one.startedAt === 0 ? at : one.startedAt }
+                : one,
+            )
+          : [
+              ...prev.list,
+              {
+                id,
+                type: '—',
+                description: '',
+                status: 'running' as const,
+                startedAt: at,
+                toolCalls: 0,
+                toolFails: 0,
+                lastText: '',
+              },
+            ],
+      }))
     }
 
     return next(e)
@@ -460,11 +736,23 @@ export const register: Register = (on, options) => {
 
         return open === undefined ? list : closeTurn(list, open.id, end)
       })
+    } else {
+      // A subagent settled: its row keeps the answer and the end time.
+      const id = String(e.agentId)
+      const at = await $.clock.now()
+      const answer = String((e as { answer?: unknown }).answer ?? '')
+
+      await update($, agents, prev => ({
+        list: closeAgent(prev.list, id, e.reason === 'answer' ? 'completed' : 'failed', at, answer),
+      }))
     }
 
     // The measurement normally lands on its own; a host that omits it (or races
-    // the turn) still gets the fresh figures here.
-    await refreshCtx($)
+    // the turn) still gets the fresh figures here — on the person's own round, not
+    // a subagent's, whose spend is already inside the session's ledger.
+    if (e.agentId === undefined) {
+      await refreshUsage($)
+    }
 
     return next(e)
   })
@@ -479,14 +767,16 @@ export const register: Register = (on, options) => {
     const callStartedAt = await $.clock.now()
 
     const ran = await next(e)
+    const isDenied = 'deny' in ran && ran.deny !== undefined
+    const isOk = !isDenied && !('isError' in ran && ran.isError === true)
 
     if (e.agentId === undefined && wire !== 'AskUserQuestion') {
-      const isOk = !('deny' in ran && ran.deny !== undefined) && !('isError' in ran && ran.isError === true)
       const finishedAt = await $.clock.now()
       const note = {
         at: callStartedAt,
         ms: finishedAt - callStartedAt,
         isOk,
+        isDenied,
         summary: summaryOf(wire, e as unknown as Record<string, unknown>),
         detail: argumentText(e),
         result: resultText(ran),
@@ -497,6 +787,12 @@ export const register: Register = (on, options) => {
 
         return open === undefined || list.length !== openedAt ? list : attachTool(list, open.id, nameOf(wire), note)
       })
+    }
+
+    if (e.agentId !== undefined) {
+      const id = String(e.agentId)
+
+      await update($, agents, prev => ({ list: tallyAgentTool(prev.list, id, isOk) }))
     }
 
     if (!wire.startsWith('mcp__')) {
@@ -523,7 +819,6 @@ export const register: Register = (on, options) => {
     await update($, calls, list => [...list, call].slice(-MAX_CALLS))
 
     const callFinishedAt = await $.clock.now()
-    const isOk = !('deny' in ran && ran.deny !== undefined) && !('isError' in ran && ran.isError === true)
     const text = 'text' in ran && typeof ran.text === 'string' ? ran.text : isOk ? '' : 'failed'
 
     await update($, calls, list =>
@@ -538,6 +833,41 @@ export const register: Register = (on, options) => {
     $.ui.log(`bench: ${String((e as { tool?: string }).tool ?? 'a call')} 未能记录`)
 
     return next(e)
+  })
+
+  // ------------------------------------------------------------- agent roster
+
+  // A spawn starts a row; the engine's answer carries the id every later event
+  // uses. A roster that cannot record it never touches the spawn itself.
+  on('agent.spawn', async ($, e, next) => {
+    const ran = await next(e)
+
+    try {
+      const spawned = ran as { agentId?: string; teammateId?: string }
+
+      if (spawned.agentId !== undefined) {
+        const at = await $.clock.now()
+
+        await update($, agents, prev => ({
+          list: upsertAgent(prev.list, {
+            id: spawned.agentId as string,
+            teammateId: spawned.teammateId,
+            type: String(e.subagentType ?? '—'),
+            description: String(e.description ?? ''),
+            parentId: e.parentAgentId === undefined ? undefined : String(e.parentAgentId),
+            status: 'running',
+            startedAt: at,
+            toolCalls: 0,
+            toolFails: 0,
+            lastText: '',
+          }),
+        }))
+      }
+    } catch (thrown) {
+      $.ui.log(`bench: 代理花名册未记录 — ${String(thrown instanceof Error ? thrown.message : thrown)}`)
+    }
+
+    return ran
   })
 
   // ------------------------------------------------------------ conversation
@@ -601,42 +931,38 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, changes)
-    const logged = await read($, calls)
-    const rounds = await read($, turns)
-    const total = list.reduce((sum, one) => sum + one.total, 0)
-    const done = list.reduce((sum, one) => sum + one.done, 0)
-    const doing = list.filter(one => one.hasTasks && one.done < one.total && !one.isArchived).length
+
+    // What the batch still owes: ready-to-archive plus archived-with-tasks-left.
+    const ready = list.filter(one => one.hasTasks && one.done >= one.total && !one.isArchived).length
     const broken = list.filter(one => one.hasTasks && one.done < one.total && one.isArchived).length
+    const awaiting = ready + broken
+    // What still counts as under way: a spawn not yet settled, waiting included.
+    const roster = await read($, agents)
+    const running = roster.list.filter(one => one.status === 'running' || one.status === 'pending' || one.status === 'waiting').length
     const room = Math.max(20, e.props.bodyColumns ?? 80)
     const live = await read($, ctx)
     const reading = ctxOf(live.tokens, live.window)
-
-    // The band's one job at the right edge is the context reading: counts step
-    // aside for it, and it steps aside only when the head alone fills the row.
-    const head = ` OpenSpec ${done}/${total}${doing > 0 ? ` ◉${doing}` : ''}${broken > 0 ? ` !${broken}` : ''}`
+    const ctxText = `CTX ${reading.text}`
+    const readyText = `待收尾 ${awaiting}`
+    const agentText = `代理 ${running}`
+    // CTX is the last thing to go: the counts step aside for it, and it steps
+    // aside only when the head alone fills the row.
     const budget = room - 9
-    const counts = `  | MCP ${logged.length} | 对话 ${rounds.length}`
-    const talk = `  | 对话 ${rounds.length}`
-    const ctxPart = `  | CTX ${reading.text}`
-    const isFull = cellsOf(head) + cellsOf(counts + ctxPart) <= budget
-    const isTalk = !isFull && cellsOf(head) + cellsOf(talk + ctxPart) <= budget
-    const isCtx = !isFull && !isTalk && cellsOf(head) + cellsOf(ctxPart) <= budget
+    let used = cellsOf(ctxText)
+    const isReady = awaiting > 0 && used + 3 + cellsOf(readyText) <= budget
+    used += isReady ? 3 + cellsOf(readyText) : 0
+    const isAgents = running > 0 && used + 3 + cellsOf(agentText) <= budget
 
-    // The narrow terminal's door: this line is what the pane would say, cut to fit.
-    // Every part of it is a plain child of the one Text, never a fragment: the JSX
-    // types here take a Text child list, not a node that happens to hold one.
     return (
       <Box flexDirection="row">
         <Button key="band-open" label="面板" dimColor onPress={() => $.ui.open({ id: PANE, title: TITLE, focus: true })} />
         <Text wrap="truncate-end">
           {' '}
-          <Text color="subtle">OpenSpec </Text>
-          <Text color="success">{`${done}/${total}`}</Text>
-          {doing > 0 ? <Text color="claude">{` ◉${doing}`}</Text> : null}
-          {broken > 0 ? <Text color="error">{` !${broken}`}</Text> : null}
-          {isFull ? <Text dimColor>{counts}</Text> : null}
-          {isTalk ? <Text dimColor>{talk}</Text> : null}
-          {isFull || isTalk || isCtx ? <Text color={reading.tone}>{ctxPart}</Text> : null}
+          {isReady ? <Text color="warning">{readyText}</Text> : null}
+          {isReady && isAgents ? <Text color="subtle">{' · '}</Text> : null}
+          {isAgents ? <Text color="claude">{agentText}</Text> : null}
+          {isReady || isAgents ? <Text color="subtle">{' · '}</Text> : null}
+          <Text color={reading.tone}>{ctxText}</Text>
         </Text>
       </Box>
     )
@@ -659,6 +985,12 @@ export const register: Register = (on, options) => {
         },
         scanState: await read($, scanState),
         ctx: await read($, ctx),
+        meter: await read($, meter),
+        breakdown: await read($, breakdown),
+        editor: await read($, editor),
+        agents: (await read($, agents)).list,
+        lang: await read($, lang),
+        agentMessages: await read($, agentMessages),
         prompts: await read($, prompts),
         branches: await read($, branches),
         diff: await read($, diff),
@@ -668,7 +1000,18 @@ export const register: Register = (on, options) => {
       const actions = {
         setView: (next: PaneState) => update($, view, () => next).then(() => undefined),
         navigate: (next: PaneState) => navigateView($, next),
-        navigateTab: (next: PaneState) => navigate($, { view: { ...next, pendingDelete: null }, diff: null, file: null }),
+        navigateTab: async (next: PaneState) => {
+          // Entering the roster asks the engine what it still lists, then keeps
+          // every row it already has: a dropped agent is not a deleted one.
+          if (next.tab === 'agent') {
+            const now = await $.clock.now()
+            const seen = await $.agent.list().catch(() => [])
+
+            await update($, agents, prev => ({ list: reconcileAgents(prev.list, seen, now) }))
+          }
+
+          await navigate($, { view: { ...next, pendingDelete: null }, diff: null, file: null })
+        },
         toggleSound: async (key: keyof SoundSettings) => {
           await update($, sounds, prev => ({ ...prev, [key]: !prev[key] }))
         },
@@ -694,8 +1037,11 @@ export const register: Register = (on, options) => {
                 : readTextOf($, `${root}/${rel}`)
             },
           ),
-        editFile: (repo: string, rel: string) =>
-          editFile($, repo, rel, editorOf(options), value => navigate($, { file: value })),
+        editFile: async (repo: string, rel: string) => {
+          const chosen = await read($, editor)
+
+          return editFile($, repo, rel, chosen.current, value => navigate($, { file: value }))
+        },
         openPrompts: async (next: PaneState) => {
           await withPrompts(async () => {
             const shelf = await readShelf($)
@@ -703,6 +1049,44 @@ export const register: Register = (on, options) => {
             await update($, prompts, () => shelf)
           })
           await navigate($, { view: { ...next, pendingDelete: null } })
+        },
+        /** The breakdown is read before the page is shown, so the page never flashes empty. */
+        showBreakdown: async (next: PaneState) => {
+          await loadBreakdown($)
+          await navigateView($, next)
+        },
+        /** The editor choices are re-read on the way in; a choice already made stands. */
+        openEditor: async (next: PaneState) => {
+          await refreshEditor($)
+          await navigateView($, next)
+        },
+        chooseEditor: async (value: string) => {
+          try {
+            const result = await $.config.set({ key: 'bench.editor', value })
+
+            if (result.deny !== undefined) {
+              await flash($, `无法切换：${result.deny}`)
+
+              return
+            }
+
+            await update($, editor, prev => ({ ...prev, current: value, error: undefined }))
+            await flash($, `编辑器：${value}`)
+          } catch (thrown) {
+            await flash($, `无法切换：${String(thrown instanceof Error ? thrown.message : thrown)}`)
+          }
+        },
+        /** The engine's list is asked on the way in; the row opens with what it has. */
+        openAgent: async (next: PaneState, id: string) => {
+          await loadAgentMessages($, id)
+          await navigateView($, next)
+        },
+        refreshBreakdown: () => loadBreakdown($),
+        /** The closeout's one act: prefill the box, never submit it. */
+        fillPrompt: async (text: string) => {
+          const filled = await $.prompt.fill({ text, mode: 'replace' })
+
+          await flash($, filled.isFilled ? '已填入输入框' : '输入框不可用')
         },
         copyPrompt: async (id: string, text: string, surface: RenderSurface) => {
           const copied = await $.ui.copy({ text, surface })
@@ -714,21 +1098,32 @@ export const register: Register = (on, options) => {
           }
 
           await withPrompts(async () => {
-            const current = await writeShelf($)
+            const target = (await read($, prompts)).list.find(one => one.id === id)
 
-            // The prompt may have been deleted while the clipboard was written.
-            if (!current.list.some(one => one.id === id)) {
+            if (target === undefined) {
               await flash($, '已删除')
 
               return
             }
 
-            const list = bumpPrompt(current.list, id)
+            const current = await scopeListOf($, target.scope)
 
-            await update($, prompts, prev => ({ ...prev, list, error: undefined }))
+            if (!current.some(one => one.id === id)) {
+              await flash($, '已删除')
+
+              return
+            }
+
+            const list = bumpPrompt(current, id)
+
+            await update($, prompts, prev => ({
+              ...prev,
+              list: prev.list.map(one => (one.id === id ? { ...one, copies: one.copies + 1 } : one)),
+              error: undefined,
+            }))
 
             try {
-              await savePrompts($, list)
+              await savePrompts($, list, target.scope)
             } catch {
               await flash($, '已复制（保存失败）')
 
@@ -738,22 +1133,107 @@ export const register: Register = (on, options) => {
             await flash($, '已复制')
           })
         },
+        /**
+         * A row's main act: put the whole text in the input box, never submit it.
+         * No box (headless, a dialog) falls back to the clipboard and says why.
+         */
+        launchPrompt: async (id: string, text: string, surface: RenderSurface) => {
+          const filled = await $.prompt.fill({ text, mode: 'replace' })
+
+          if (!filled.isFilled) {
+            const copied = await $.ui.copy({ text, surface })
+
+            if (!copied.isCopied) {
+              await flash($, `输入框不可用，复制失败：${copied.reason}`)
+
+              return
+            }
+
+            await withPrompts(async () => {
+              const target = (await read($, prompts)).list.find(one => one.id === id)
+
+              if (target === undefined) {
+                await flash($, '已删除')
+
+                return
+              }
+
+              const current = await scopeListOf($, target.scope)
+              const list = bumpPrompt(current, id)
+
+              await update($, prompts, prev => ({
+                ...prev,
+                list: prev.list.map(one => (one.id === id ? { ...one, copies: one.copies + 1 } : one)),
+                error: undefined,
+              }))
+
+              try {
+                await savePrompts($, list, target.scope)
+              } catch {
+                await flash($, '已复制（输入框不可用，保存失败）')
+
+                return
+              }
+
+              await flash($, '已复制（输入框不可用）')
+            })
+
+            return
+          }
+
+          await withPrompts(async () => {
+            const target = (await read($, prompts)).list.find(one => one.id === id)
+
+            if (target === undefined) {
+              await flash($, '已删除')
+
+              return
+            }
+
+            const current = await scopeListOf($, target.scope)
+            const list = bumpLaunch(current, id)
+
+            await update($, prompts, prev => ({
+              ...prev,
+              list: prev.list.map(one => (one.id === id ? { ...one, launches: one.launches + 1 } : one)),
+              error: undefined,
+            }))
+
+            try {
+              await savePrompts($, list, target.scope)
+            } catch {
+              await flash($, '已填入（保存失败）')
+
+              return
+            }
+
+            await flash($, '已填入输入框')
+          })
+        },
         askDelete: (id: string) => update($, view, prev => ({ ...prev, pendingDelete: id })).then(() => undefined),
         cancelDelete: () => update($, view, prev => ({ ...prev, pendingDelete: null })).then(() => undefined),
         confirmDelete: (id: string) =>
           withPrompts(async () => {
-            const current = await writeShelf($)
-            const list = removePrompt(current.list, id)
+            const target = (await read($, prompts)).list.find(one => one.id === id)
+
+            if (target === undefined) {
+              await update($, view, prev => ({ ...prev, pendingDelete: null }))
+
+              return
+            }
+
+            const current = await scopeListOf($, target.scope)
+            const list = removePrompt(current, id)
 
             try {
-              await savePrompts($, list)
+              await savePrompts($, list, target.scope)
             } catch {
               await flash($, '删除失败：无法写入文件')
 
               return
             }
 
-            await update($, prompts, prev => ({ ...prev, list, error: undefined }))
+            await update($, prompts, prev => ({ ...prev, list: prev.list.filter(one => one.id !== id), error: undefined }))
             await update($, view, prev => ({ ...prev, pendingDelete: null }))
           }),
       }

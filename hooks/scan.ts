@@ -321,7 +321,28 @@ export async function changeOf(
   isArchived: boolean,
 ): Promise<SpecChange> {
   const entries = await listOf($, dir)
-  const files = entries.filter(one => one.kind === 'file').map(one => one.name)
+  const files = entries.map(one => one.name)
+  // What `specs/` holds, so the detail can open one: one folder per capability,
+  // each with its own spec.md.
+  const specFiles: string[] = []
+
+  for (const entry of entries) {
+    if (entry.kind !== 'dir' || entry.name !== 'specs') {
+      continue
+    }
+
+    for (const capability of await listOf($, `${dir}/specs`)) {
+      if (capability.kind !== 'dir') {
+        continue
+      }
+
+      for (const file of await listOf($, `${dir}/specs/${capability.name}`)) {
+        if (file.kind === 'file' && file.name.endsWith('.md')) {
+          specFiles.push(`specs/${capability.name}/${file.name}`)
+        }
+      }
+    }
+  }
   let done = 0
   let total = 0
   // A folder's own time says nothing of what changed inside it, so each file and
@@ -367,6 +388,7 @@ export async function changeOf(
     total,
     hasTasks,
     files,
+    specFiles,
     mtime,
     isArchived,
     needNo: needNo?.[1] ?? '',

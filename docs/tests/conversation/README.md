@@ -29,7 +29,27 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 | the session rail writes its tokens in K and names the context | 四项显示为 `120K`/`8K`/`340K`/`21K`，行尾 `CTX 62%` |
 | the context reading changes colour at 70 and 90 | 62% → `subtle`、70% → `warning`、90% → `error` |
 | a narrow rail drops the context before it shortens its labels | 100 列保留 CTX；72 列丢 CTX 仍用「缓存读」；60 列才缩写为「读/写」 |
+| the rail ends with the context, the quota windows and the cost | 140 列下统计行是 `· CTX 62% · 5h 38% · 7d 61% · $0.42` |
+| a host without a ledger reads a dash, and a missing window is left out | 无 `cost` 写 `$—`；`rateLimits` 为空时不出现 `5h` / `7d` / `0%` |
+| the rail drops cost, then seven days, then five hours, before the context | 纯函数 `railOf`：按 `$ → 7d → 5h → CTX` 的顺序收缩 |
+| at 80, 64 and 48 columns the rail never overflows, and drops from the right | 三个宽度下标签不超宽，存活读数保持从左到右的顺序 |
 | the model drill writes its tokens in K and never a percentage | 下钻每行用 K/M，整页不出现 `%` |
+
+### 成本 / 额度 / 构成（`hooks/register.test.tsx`、`hooks/meter.test.tsx`、`hooks/interaction.test.tsx`）
+
+| 测试 | 验的是什么 |
+|---|---|
+| a cost reads as dollars, and a host without a ledger as a dash | `usdOf`：`$0.42` / `$—` |
+| a quota window reads as a whole percentage and earns its tone | `quotaOf`：取整、70 / 90 阈值 |
+| a window the engine did not report is left out, never read as zero | 缺失窗口返回 `undefined` |
+| a reset time reads as the local hour and minute, and a missing one as nothing | `resetsOf`：ISO → 本地 `HH:MM`，缺失为空串 |
+| a session’s start reads the cost and quota beside the context | 一次 `usage()` 同时写 `ctx` 与 `meter` |
+| a measurement moves the cost and quota with the context | `session.measure` 更新三项读数 |
+| a turn’s end re-reads the ledger where no measurement came | 主线程 `turn.complete` 重新读取账本 |
+| a host without a ledger keeps the dash and never invents a window | 3P：`$—`，不补 0 |
+| the context reading opens the breakdown, refreshes it, and never compacts | 点 CTX 进构成页、按降序、合计、刷新、返回；`usage` 只用 `summary`，`session.compact` 调用 0 次 |
+| an engine without a breakdown says so, and keeps its way back | 无 `breakdown` 显示「引擎未提供构成」，返回可用 |
+| the breakdown wraps its names at 80, 40 and 24 columns without overflowing | 类别名折行，所有文本行不超过列宽 |
 
 ### 轮次本身（纯函数，`hooks/conversation.test.tsx`）
 
@@ -53,6 +73,22 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 | an interrupted round reads as interrupted, with nothing to count | 详情含「中断」、`300ms`、用量 `—（未计数）` |
 | the rounds are the newest first | 两轮按时间倒序 |
 | a question and a typed turn lead their rows with their own tags | `AskUserQuestion` 开一轮标 `提问`，人提交的一轮标 `输入`；预置文本 `Base directory` 不成为一轮 |
+
+### 失败归因与 MCP 入口（`hooks/failure.test.tsx`、`hooks/interaction.test.tsx`、`hooks/register.test.tsx`）
+
+| 测试 | 验的是什么 |
+|---|---|
+| a command is normalized by its whitespace, never rewritten | `normalizeCommand` 只去首尾空白、压缩空白 |
+| only failed calls are failures, in the order they ran | `failuresOf` 只取 `isOk === false`，按时间排序 |
+| failures group by tool, most failures first, each with its last error | `groupFailures` 次数降序、同次数最近优先，带最后错误摘要 |
+| the same command three times reads as looping, twice does not | 同一归一化命令 3 次为真，2 次为假 |
+| the same tool and error three times reads as looping, a different error breaks it | 同一工具 + 同一错误 3 次为真；不同错误打断 |
+| failures are counted, grouped by tool, and drilled to the call | 统计轨道 `失败 3 次` → 工具行 → 失败调用 → 调用详情（`结果 失败` + 参数） |
+| the same command three times is marked as going in circles | 会话行尾出现 `可能在打转`，不改变状态标签 |
+| the four tabs carry the four hotkeys, and no old tab survives | 四页签与 `1–4` 热键；没有 MCP / 提示音顶层页签；代理页空态 |
+| an MCP call is kept under the server that served it | MCP 三层下钻与逐层返回 |
+| a built-in tool is not kept as an MCP call | 内置工具不进 MCP 列表，入口页给空态 |
+| an old five-tab page migrates onto the four tabs | 旧 `tab` 值迁移：`openspec→spec`、`mcp→conversation+path`、`sounds/other→more` |
 
 ### 折叠（`hooks/folding.test.tsx`）
 
@@ -80,6 +116,9 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 - **热重载后游标丢失**：设计上接受，未测。
 - **CJK 实际宽度**：标签与 `▸` 的终端渲染宽度只按 East Asian Width 数据核对过，未在真实 CJK 字体下截图验证。
 - **统计轨道的窄高行为**：`bodyRows < 20` 时压成一行由代码保证，测试未逐行断言。
+- **真实终端里点 CTX**：自动化只验证 `ui.press` 的导航与副作用；鼠标点击、窄屏重排、返回按钮实际位置需真机确认。
+- **真实引擎的成本与额度**：测试里的 `cost` / `rateLimits` 是手填的，3P 供应商真实缺失路径需真机确认。
+- **构成页的滚动与主题**：内容超过一屏时的滚动提示、暗/亮主题下的读数可读性未在自动化中截图验证。
 
 ## 手工验证步骤
 
@@ -89,3 +128,5 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 4. 粘 20 行以上文字发送 → 输入折到 6 行。
 5. 让 AI 干长活，中途 Esc 打断 → 行标签变 `异常`，详情 `结束: 中断`，用量 `—`。
 6. 点统计轨道「会话」「工具」「命令」，逐层下钻再 `b` 返回；确认每一层都没有页签。
+7. 有订阅额度时，确认统计行尾 `5h` / `7d` / `$` 与 `/cost`、状态行一致；3P 会话确认显示 `$—` 而不是 `$0.00`。
+8. 鼠标点统计行的 `CTX` → 构成页按类别降序列出、合计正确 → 点 `刷新` → `b` 或右上角返回对话列表；确认全程没有触发压缩。

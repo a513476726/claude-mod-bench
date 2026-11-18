@@ -28,8 +28,19 @@ function world(on: On) {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/ws/sales-platform' }))
+  on('session.root', () => ({ value: '/ws/sales-platform' }))
   on('fs.stat', (_, e) => {
-    if (['/ws/.git', '/ws/sales-platform', '/ws/sales-platform/.git', '/ws/sales-platform/side', '/ws/sales-platform/side/.git'].includes(e.path)) {
+    const dirs = [
+      '/ws/.git',
+      '/ws/sales-platform',
+      '/ws/sales-platform/.git',
+      '/ws/sales-platform/side',
+      '/ws/sales-platform/side/.git',
+      '/ws/sales-platform/openspec/changes/ready-one/specs',
+      '/ws/sales-platform/openspec/changes/ready-one/specs/spec-k',
+    ]
+
+    if (dirs.includes(e.path)) {
       return { value: { kind: 'dir', size: 0, isLink: false, mtimeMs: 1 } }
     }
 
@@ -72,6 +83,24 @@ function world(on: On) {
 
     if (e.path.endsWith('bare-one') || e.path === '/ws/sales-platform/side') {
       return { value: [] }
+    }
+
+    if (e.path.endsWith('ready-one')) {
+      return {
+        value: [
+          { name: 'tasks.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 },
+          { name: 'proposal.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 },
+          { name: 'specs', kind: 'dir', size: 0, isLink: false, mtimeMs: 1 },
+        ],
+      }
+    }
+
+    if (e.path.endsWith('ready-one/specs')) {
+      return { value: [{ name: 'spec-k', kind: 'dir', size: 0, isLink: false, mtimeMs: 1 }] }
+    }
+
+    if (e.path.endsWith('ready-one/specs/spec-k')) {
+      return { value: [{ name: 'spec.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 }] }
     }
 
     return {
@@ -396,9 +425,10 @@ test('the sounds page holds four switches, a press flips one once, and each prev
 
   const ui = await mountOf($)
 
-  // There is no pet tab any more; the fourth tab is the sound switches.
+  // Sounds live behind the more page now, not under a tab of their own.
   expect(await ui.find({ type: 'Button', key: 'tab-pet' })).toBeUndefined()
-  await ui.press({ key: 'tab-sounds' })
+  await ui.press({ key: 'tab-more' })
+  await ui.press({ key: 'more:more-sounds' })
 
   const label = (one: unknown) => String((one as { props?: { label?: string } } | undefined)?.props?.label ?? '')
 
@@ -651,4 +681,306 @@ test('the status tag is the row\'s only colour', async ($, on) => {
   expect(names.every(one => one.props?.color === undefined)).toBe(true)
 
   await ui.unmount()
+})
+
+/** A turn with a few tool calls, each failing when `fails` says so. */
+async function callsIn($: Engine, on: On, fails: boolean, commands: string[]) {
+  on('tool.call', () => (fails ? { result: {}, text: 'same error', isError: true } : { result: {}, text: 'ok' }))
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '跑几条命令' } as never).catch(() => undefined)
+
+  for (const [at, command] of commands.entries()) {
+    await $.tool.call({ tool: 'Bash', tool_use_id: `c${at}`, command })
+  }
+}
+
+test('failures are counted, grouped by tool, and drilled to the call', async ($, on) => {
+  world(on)
+  await callsIn($, on, true, ['npx tsc', 'npm test'])
+
+  // A Read that failed too, on the same round.
+  await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: 'a.ts' })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'tab-conversation' })
+
+  const failures = (await ui.find({ type: 'Button', key: 'stat-failures' })) as { props?: { label?: string } } | undefined
+
+  expect(String(failures?.props?.label ?? '')).toContain('失败 3 次')
+
+  await ui.press({ key: 'stat-failures' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  expect(page).toContain('Bash 2 次 · same error')
+  expect(page).toContain('Read 1 次 · same error')
+
+  await ui.press({ key: 'drill-failure:Bash' })
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('Bash · 失败 2 次')
+
+  // One failed call's own page says it failed, with its arguments.
+  await ui.press({ key: 'drill-call:1700000000000-0:Bash:0' })
+
+  const detail = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  expect(detail).toMatch(/结果\s+失败/)
+  expect(detail).toContain('参数')
+
+  await ui.unmount()
+})
+
+test('the same command three times is marked as going in circles', async ($, on) => {
+  world(on)
+  await callsIn($, on, false, ['npm test', 'npm test', 'npm test'])
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'tab-conversation' })
+
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('可能在打转')
+
+  await ui.unmount()
+})
+
+test('a change detail preflights its next step and opens its files, never submitting', async ($, on) => {
+  world(on)
+
+  let filled = ''
+
+  on('prompt.fill', (_, e) => {
+    filled = e.text
+
+    return { isFilled: true, text: e.text, cursor: e.text.length }
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+  const pageOf = async () => (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  // The closeout rail counts what the batch still owes.
+  const list = await pageOf()
+  expect(list).toContain('进行 1')
+  expect(list).toContain('待收尾 1')
+  expect(list).toContain('异常 1')
+
+  await ui.press({ key: 'row-sales-platform/ready-one' })
+
+  expect(await ui.find({ type: 'Button', key: 'action-continue' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'action-archive' })).toBeDefined()
+  expect(await pageOf()).toContain('可以归档。')
+
+  await ui.press({ key: 'action-continue' })
+  expect(filled).toBe('/opsx:apply ready-one')
+  expect(await pageOf()).toContain('已填入输入框')
+
+  await ui.press({ key: 'action-archive' })
+  expect(filled).toBe('/opsx:archive ready-one')
+
+  await ui.press({ key: 'open-tasks' })
+  expect(String((await ui.find({ type: 'Code' }))?.props.source ?? '')).toContain('- [x] a')
+
+  // The file page's back returns to the list, so the detail is opened again for
+  // the other door.
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'row-sales-platform/ready-one' })
+  await ui.press({ key: 'open-specs' })
+  expect(await ui.find({ type: 'Code' })).toBeDefined()
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Button', key: 'rail-doing' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a change whose input box is unavailable says so, and never submits', async ($, on) => {
+  world(on)
+  on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer', text: '', cursor: 0 }))
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'row-sales-platform/ready-one' })
+  await ui.press({ key: 'action-continue' })
+
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('输入框不可用')
+
+  await ui.unmount()
+})
+
+test('a change that is not ready says what it still owes, and offers no archive', async ($, on) => {
+  world(on)
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'row-sales-platform/doing-one' })
+
+  expect(await ui.find({ type: 'Button', key: 'action-continue' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'action-archive' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('还差 2 项')
+
+  await ui.unmount()
+})
+
+test('the next-step actions fit 80, 40 and 24 columns without overflowing', async ($, on) => {
+  world(on)
+  on('prompt.fill', (_, e) => ({ isFilled: true, text: e.text, cursor: e.text.length }))
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  for (const columns of [80, 40, 24]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+
+    await ui.press({ key: 'row-sales-platform/ready-one' })
+
+    for (const one of (await ui.findAll({ type: 'Text' })) as { text?: string }[]) {
+      expect(cellsOf(String(one.text ?? ''))).toBeLessThanOrEqual(columns)
+    }
+
+    await ui.press({ key: 'back' })
+    await ui.unmount()
+  }
+})
+/** A square of the engine's context grid, as the breakdown page reads it. */
+function square(categoryName: string, tokens: number, percentage: number) {
+  return { categoryName, tokens, percentage, color: 'inactive', isFilled: tokens > 0, squareFullness: 1 }
+}
+
+/** The engine's usage with a breakdown, and where its calls are recorded. */
+function usageWorld(on: On, rows: () => { label: string; tokens: number; percent: number }[]) {
+  const calls: { breakdown?: string }[] = []
+
+  on('session.usage', (_, args) => {
+    calls.push(args as { breakdown?: string })
+
+    return {
+      value: {
+        startedAt: 0,
+        context: {
+          tokens: 620_000,
+          window: 1_000_000,
+          breakdown: {
+            categories: [],
+            totalTokens: 620_000,
+            maxTokens: 1_000_000,
+            rawMaxTokens: 1_000_000,
+            autocompactSource: 'auto',
+            percentage: 62,
+            gridRows: [rows().map(one => square(one.label, one.tokens, one.percent))],
+            model: 'opus',
+            memoryFiles: [],
+            mcpTools: [],
+            agents: [],
+            isAutoCompactEnabled: false,
+            apiUsage: null,
+          },
+        },
+        rateLimits: [],
+      },
+    }
+  })
+
+  return calls
+}
+
+async function breakdownUi($: Engine, columns = 100) {
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: 'stat-ctx' })
+
+  return ui
+}
+
+const textsOf = async (ui: Awaited<ReturnType<typeof mountOf>>) =>
+  (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+test('the context reading opens the breakdown, refreshes it, and never compacts', async ($, on) => {
+  world(on)
+
+  let rows = [
+    { label: 'System prompt', tokens: 120_000, percent: 12 },
+    { label: 'Messages', tokens: 420_000, percent: 42 },
+    { label: 'Free space', tokens: 380_000, percent: 38 },
+  ]
+  const calls = usageWorld(on, () => rows)
+  let compacts = 0
+
+  on('session.compact', () => {
+    compacts += 1
+
+    return { skip: 'test never compacts' }
+  })
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await breakdownUi($)
+  const page = await textsOf(ui)
+
+  // Largest first, with the engine's own total under a rule.
+  expect(page.indexOf('Messages')).toBeLessThan(page.indexOf('Free space'))
+  expect(page.indexOf('Free space')).toBeLessThan(page.indexOf('System prompt'))
+  expect(page).toContain('420K · 42%')
+  expect(page).toContain('合计')
+  // Only the local estimate was asked for: `full` would send token-count requests.
+  // The session's own read at start passes no arguments; the breakdown read is the
+  // one with a detail, and it is always `summary`.
+  expect(calls.filter(one => one.breakdown !== undefined)).toEqual([{ breakdown: 'summary' }])
+  expect(calls.some(one => (one as { breakdown?: string }).breakdown === 'full')).toBe(false)
+
+  rows = [
+    { label: 'Messages', tokens: 500_000, percent: 50 },
+    { label: 'Free space', tokens: 300_000, percent: 30 },
+  ]
+  await ui.press({ key: 'breakdown-refresh' })
+
+  expect(await textsOf(ui)).toContain('500K · 50%')
+  expect(calls.filter(one => one.breakdown !== undefined)).toHaveLength(2)
+
+  await ui.press({ key: 'back' })
+
+  // Back on the conversation list, and nothing was compacted on the way.
+  expect(await ui.find({ type: 'Button', key: 'stat-ctx' })).toBeDefined()
+  expect(compacts).toBe(0)
+
+  await ui.unmount()
+})
+
+test('an engine without a breakdown says so, and keeps its way back', async ($, on) => {
+  world(on)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1_000_000 }, rateLimits: [] } }))
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  const ui = await breakdownUi($)
+
+  expect(await textsOf(ui)).toContain('引擎未提供构成')
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('the breakdown wraps its names at 80, 40 and 24 columns without overflowing', async ($, on) => {
+  world(on)
+  usageWorld(on, () => [
+    { label: 'System prompt with a very long category name', tokens: 120_000, percent: 100 },
+    { label: 'Messages', tokens: 420_000, percent: 42 },
+  ])
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+
+  // The rail is too tight for a CTX door at 24 columns, so enter once at a width
+  // that draws it; the page itself is what must hold at every width.
+  const entered = await breakdownUi($, 100)
+
+  await entered.unmount()
+
+  for (const columns of [80, 40, 24]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: columns }, surface: 'terminal' })
+    const texts = (await ui.findAll({ type: 'Text' })) as { text?: string }[]
+
+    for (const one of texts) {
+      expect(cellsOf(String(one.text ?? ''))).toBeLessThanOrEqual(columns)
+    }
+
+    await ui.unmount()
+  }
 })

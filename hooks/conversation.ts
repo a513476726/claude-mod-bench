@@ -50,6 +50,8 @@ export type NoteSeen = {
   at: number
   ms: number
   isOk: boolean
+  /** Refused rather than failed; the detail says which. */
+  isDenied?: boolean
   summary: string
   detail: string
   result: string
@@ -114,6 +116,7 @@ function bumpTool(tools: TurnTool[], name: string, note: NoteSeen): TurnTool[] {
     at: note.at,
     ms: note.ms,
     isOk: note.isOk,
+    ...(note.isDenied === true ? { isDenied: true } : {}),
     summary: capText(note.summary, MAX_SUMMARY, capMark(MAX_SUMMARY), false),
     detail: capText(note.detail, MAX_DETAIL, capMark(MAX_DETAIL)),
     result: capText(note.result, MAX_RESULT, capMark(MAX_RESULT)),

@@ -15,7 +15,7 @@ claude plugin test . 2>&1 | grep -i "sounds page"           # 只看这一块
 
 | 测试 | 文件 | 验的是什么 |
 |---|---|---|
-| the sounds page holds four switches, a press flips one once, and each previews | `hooks/interaction.test.tsx` | 没有 `tab-pet`；按 `tab-sounds` 出现 `sound-isOn/decision/done/error` 四行与 `preview-done`；行首是 `开` / `关` 标签、没有 emoji；按一次「任务完成」只翻一次（开 → 关），再按一次回到开 |
+| the sounds page holds four switches, a press flips one once, and each previews | `hooks/interaction.test.tsx` | 没有 `tab-pet`、没有顶层提示音页签；按「更多 → 提示音」出现 `sound-isOn/decision/done/error` 四行与 `preview-done`；行首是 `开` / `关` 标签、没有 emoji；按一次「任务完成」只翻一次（开 → 关），再按一次回到开 |
 
 `audio.play` 在测试里被桩掉，只断言「会去播放」，不验声音本身。
 
