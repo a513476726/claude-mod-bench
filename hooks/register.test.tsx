@@ -36,15 +36,40 @@ test('the pane draws its titles and says when there is nothing to show', async (
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
 
-    expect(await ui.find({ type: 'Button', ...{ key: 'tab-openspec' } })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'tab-mcp' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', ...{ key: 'tab-spec' } })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'tab-more' })).toBeDefined()
 
     await ui.unmount()
   }
 })
 
-test('an MCP call is kept under the server that served it', async ($, on) => {
+test('the four tabs carry the four hotkeys, and no old tab survives', async ($, on) => {
   quiet(on)
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Button', key: 'tab-conversation' }))?.props?.hotkey).toBe('1')
+
+  // A selected tab is plain; the other three keep their bracketed hotkey.
+  await ui.press({ key: 'tab-conversation' })
+
+  expect((await ui.find({ type: 'Button', key: 'tab-spec' }))?.props?.hotkey).toBe('2')
+  expect((await ui.find({ type: 'Button', key: 'tab-agent' }))?.props?.hotkey).toBe('3')
+  expect((await ui.find({ type: 'Button', key: 'tab-more' }))?.props?.hotkey).toBe('4')
+
+  expect(await ui.find({ type: 'Button', key: 'tab-mcp' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'tab-sounds' })).toBeUndefined()
+
+  // The agent page is a skeleton until iteration 4: an empty state, never a fake row.
+  await ui.press({ key: 'tab-agent' })
+  expect(await ui.find({ type: 'Text', text: /本会话还没有子代理/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('an MCP call is kept under the server that served it', async ($, on) => {  quiet(on)
   on('tool.call', () => ({ result: {}, text: 'ok' }))
 
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
@@ -57,17 +82,29 @@ test('an MCP call is kept under the server that served it', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  // The MCP row is drawn once the MCP title is pressed: the list starts on OpenSpec.
-  await ui.press({ key: 'tab-mcp' })
+  // MCP is a door on the conversation page now: the server, its calls, then the call.
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: 'stat-mcp' })
 
-  expect(await ui.find({ type: 'Button', text: /oracle-apex/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'drill-mcp:oracle-apex' })).toBeDefined()
 
-  await ui.press({ key: 'row-mcp:oracle-apex' })
+  await ui.press({ key: 'drill-mcp:oracle-apex' })
+  await ui.press({ key: 'drill-mcp:oracle-apex:call-1' })
 
   const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
-  expect(texts).toContain('MCP')
+  expect(texts).toContain('参数')
   expect(texts).toContain('oracle-apex')
+
+  // Back up one level at a time: the calls, the servers, then the conversation list.
+  await ui.press({ key: 'back' })
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('oracle-apex · 1 次')
+
+  await ui.press({ key: 'back' })
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('MCP · 1 个服务器')
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Button', key: 'stat-mcp' })).toBeDefined()
 
   await ui.unmount()
 })
@@ -81,18 +118,20 @@ test('a built-in tool is not kept as an MCP call', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  await ui.press({ key: 'tab-mcp' })
+  await ui.press({ key: 'tab-conversation' })
+  await ui.press({ key: 'stat-mcp' })
 
-  // A built-in call is not an MCP call: the tab stays empty of it.
-  const empty = await ui.find({ type: 'Text', text: /还没有调用 MCP/ })
+  // A built-in call is not an MCP call: the server list stays empty of it.
+  const empty = await ui.find({ type: 'Text', text: /本次会话没有 MCP 调用/ })
 
-  expect(empty?.text).toContain('还没有调用 MCP')
+  expect(empty?.text).toContain('本次会话没有 MCP 调用')
 
   await ui.unmount()
 })
 
-test('the band above the prompt shows the totals and opens the pane', async ($, on) => {
+test('the band says what is still owed and opens the pane', async ($, on) => {
   quiet(on)
+  measuring(on, () => ({ tokens: 620_000, window: 1_000_000 }))
 
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
 
@@ -106,7 +145,9 @@ test('the band above the prompt shows the totals and opens the pane', async ($, 
   const open = await band.find({ type: 'Button', key: 'band-open' })
 
   expect(open).toBeDefined()
-  expect((await band.find({ type: 'Text', text: /OpenSpec/ }))?.text).toContain('OpenSpec')
+  // Nothing is owed and no agent runs: the band is the context reading alone.
+  expect((await band.find({ type: 'Text', text: /CTX 62%/ }))?.text).toContain('CTX 62%')
+  expect((await band.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('')).not.toContain('待收尾 0')
 
   await band.unmount()
 })
@@ -331,11 +372,60 @@ test('the band colours the context reading like the rail', async ($, on) => {
   await band.unmount()
 })
 
-test('a tight band sheds its counts before it sheds the context', async ($, on) => {
-  quiet(on)
-  measuring(on, () => ({ tokens: 620_000, window: 1_000_000 }))
+/** One repo whose only change has every task ticked: the band owes one archive. */
+function readyBand(on: On) {
+  mock.clock(on, { now: 1_700_000_000_000 })
+  on('command.register', () => ({ value: { command: 'panel' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: '/ws/app' }))
+  on('env.get', () => ({ value: '/home/tester' }))
+  on('fs.stat', (_, e) => {
+    const dirs = [
+      '/ws',
+      '/ws/app',
+      '/ws/app/.git',
+      '/ws/app/openspec',
+      '/ws/app/openspec/changes',
+      '/ws/app/openspec/changes/ready-one',
+    ]
 
-  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+    return dirs.includes(e.path)
+      ? { value: { kind: 'dir', size: 0, isLink: false, mtimeMs: 1 } }
+      : { deny: 'ENOENT' }
+  })
+  on('fs.list', (_, e) => {
+    if (e.path === '/ws') return { value: [{ name: 'app', kind: 'dir', size: 0, isLink: false, mtimeMs: 1 }] }
+    if (e.path === '/ws/app') return { value: [{ name: 'openspec', kind: 'dir', size: 0, isLink: false, mtimeMs: 1 }] }
+    if (e.path === '/ws/app/openspec/changes') {
+      return { value: [{ name: 'ready-one', kind: 'dir', size: 0, isLink: false, mtimeMs: 50 }] }
+    }
+    if (e.path.endsWith('ready-one')) {
+      return {
+        value: [
+          { name: 'tasks.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 },
+          { name: 'proposal.md', kind: 'file', size: 1, isLink: false, mtimeMs: 1 },
+        ],
+      }
+    }
+
+    return { value: [] }
+  })
+  on('fs.read', (_, e) => {
+    if (e.path.endsWith('/.git/HEAD')) return { value: 'ref: refs/heads/main\n' }
+    if (e.path.endsWith('ready-one/tasks.md')) return { value: '- [x] a\n' }
+    if (e.path.endsWith('proposal.md')) return { value: '# x\n' }
+
+    return { value: '' }
+  })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 620_000, window: 1_000_000 }, rateLimits: [] } }))
+  on('config.list', () => ({ value: [] }))
+}
+
+test('a tight band sheds the owed count before it sheds the context', async ($, on) => {
+  readyBand(on)
+
+  await $.session.start({ cwd: '/ws/app', surface: 'terminal', isInteractive: true })
 
   const lineOf = async (columns: number) => {
     const band = await bandAt($, columns)
@@ -346,23 +436,18 @@ test('a tight band sheds its counts before it sheds the context', async ($, on) 
     return line
   }
 
-  const wide = await lineOf(100)
-  expect(wide).toContain('MCP')
-  expect(wide).toContain('对话')
-  expect(wide).toContain('CTX 62%')
+  for (const columns of [80, 64, 40]) {
+    const line = await lineOf(columns)
 
-  const noMcp = await lineOf(45)
-  expect(noMcp).not.toContain('MCP')
-  expect(noMcp).toContain('对话')
-  expect(noMcp).toContain('CTX 62%')
+    expect(line).toContain('待收尾 1')
+    expect(line).toContain('CTX 62%')
+    expect(line).not.toContain('代理 0')
+  }
 
-  const ctxOnly = await lineOf(40)
-  expect(ctxOnly).not.toContain('MCP')
-  expect(ctxOnly).not.toContain('对话')
+  // At 24 columns only the reading the batch cannot do without survives.
+  const ctxOnly = await lineOf(24)
+  expect(ctxOnly).not.toContain('待收尾')
   expect(ctxOnly).toContain('CTX 62%')
-
-  const tooTight = await lineOf(30)
-  expect(tooTight).not.toContain('CTX')
 })
 
 /** The engine's usage as the pane reads it: context, ledger and windows together. */

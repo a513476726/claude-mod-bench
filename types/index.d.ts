@@ -92,6 +92,8 @@ export type ToolNote = {
   ms: number
   /** Answered without error. */
   isOk: boolean
+  /** Refused by a permission check or a deny, rather than reported as an error. */
+  isDenied?: boolean
   /** One line: a Bash command, a Skill's name, otherwise the tool and its first argument. */
   summary: string
   /** The whole of what was asked, cut at 2 000 characters. */
@@ -197,6 +199,8 @@ declare module 'claude-code' {
       meter: Shaped<Meter>
       /** The context window by category, read on demand for the breakdown page. */
       breakdown: Shaped<BreakdownStore>
+      /** The editor files open in, and the choices the plugin's config row offers. */
+      editor: Shaped<{ current: string; options: string[]; error?: string }>
       /** The saved prompts in display order, and why the file could not be read. */
       prompts: Shaped<{ list: Prompt[]; error?: string }>
       sounds: Shaped<SoundSettings>

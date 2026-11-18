@@ -17,7 +17,7 @@ import { editorOf, editFile, openDiff, openFile, readTextOf, rootOf, type DiffSh
 import { capMark, capText, cellsOf, ctxOf } from './format'
 import { NO_FILTER } from './items'
 import { breakdownOf, NO_BREAKDOWN, type BreakdownStore } from './meter'
-import { drawPane, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
+import { drawPane, migrateView, nameOf, pageKeyOf, play, serverOf, type ContextFill, type PaneState, type PromptStore } from './panes'
 import {
   addPrompt,
   bumpPrompt,
@@ -51,7 +51,7 @@ const SPEC_POLL_MS = 5_000
 const view = atom(
   { plugin: 'bench', key: 'view' } as const,
   {
-    tab: 'openspec',
+    tab: 'spec',
     index: 0,
     isDetail: false,
     fullSection: null,
@@ -91,6 +91,12 @@ const meter = atom({ plugin: 'bench', key: 'meter' } as const, { rateLimits: [] 
 const breakdown = atom({ plugin: 'bench', key: 'breakdown' } as const, NO_BREAKDOWN as BreakdownStore, {
   shape: 'breakdown-1',
 })
+/** The editor files open in, and the choices the plugin's config row offers. */
+const editor = atom(
+  { plugin: 'bench', key: 'editor' } as const,
+  { current: '终端内', options: [] } as { current: string; options: string[]; error?: string },
+  { shape: 'editor-1' },
+)
 /** The saved prompts, in display order, and why the file could not be read. */
 const prompts = atom({ plugin: 'bench', key: 'prompts' } as const, { list: [] } as PromptStore, { shape: 'prompts-1' })
 const diff = atom({ plugin: 'bench', key: 'diff' } as const, null as DiffShown | null, { shape: 'diff-3' })
@@ -265,8 +271,7 @@ async function refreshUsage(
  * One read of the context window by category, for the breakdown page. `summary`
  * counts locally and sends no token-count request; a reading without a breakdown
  * is said so, not drawn as an empty table.
- */
-async function loadBreakdown($: EngineInterface): Promise<void> {
+ */async function loadBreakdown($: EngineInterface): Promise<void> {
   let usage: { context: { breakdown?: Parameters<typeof breakdownOf>[0] } } | null = null
 
   try {
@@ -286,6 +291,45 @@ async function loadBreakdown($: EngineInterface): Promise<void> {
       ? { ...NO_BREAKDOWN, isLoaded: true, error: '引擎未提供构成' }
       : { ...built, isLoaded: true },
   )
+}
+
+/** The editor choices the plugin's config row declares; a host that cannot list
+ * them keeps the current value and says why the list is empty. */
+async function readEditorChoices($: EngineInterface): Promise<{ options: string[]; error?: string }> {
+  try {
+    const rows = await $.config.list()
+    const row = rows.find(one => one.key === 'bench.editor')
+
+    return {
+      options: row?.options === undefined ? [] : [...row.options],
+      ...(row?.isLocked === true ? { error: '该选项由组织策略锁定，不能在面板里修改' } : {}),
+    }
+  } catch (thrown) {
+    return { options: [], error: `读取编辑器选项失败：${String(thrown instanceof Error ? thrown.message : thrown)}` }
+  }
+}
+
+/** The editor at a session's start: the configured value and its choices. */
+async function resetEditor($: EngineInterface, options: PluginOptions): Promise<void> {
+  const { options: choices, error } = await readEditorChoices($)
+
+  await update($, editor, () => ({
+    current: editorOf(options),
+    options: choices,
+    ...(error === undefined ? {} : { error }),
+  }))
+}
+
+/** The choices alone, for a visit to the editor page: a choice made here stands. */
+async function refreshEditor($: EngineInterface): Promise<void> {
+  const { options: choices, error } = await readEditorChoices($)
+  const before = await read($, editor)
+
+  await update($, editor, () => ({
+    current: before.current,
+    options: choices,
+    ...(error === undefined ? {} : { error }),
+  }))
 }
 
 const PROMPT_FILE = '.claude/bench-prompts.json'
@@ -418,6 +462,17 @@ export const register: Register = (on, options) => {
     await loadPrompts($)
     await refreshUsage($)
 
+    // A page restored from an older build still names one of its five tabs; move
+    // it onto today's four before anything draws.
+    const restored = (await read($, view)) as PaneState
+    const migrated = migrateView(restored)
+
+    if (migrated !== restored) {
+      await update($, view, () => migrated)
+    }
+
+    await resetEditor($, options)
+
     // The engine itself says why a pane waits: a floor it fell under, or a surface
     // that places none. Guessing at the width hid the real cause once already.
     const open = await $.ui.open({ id: PANE, title: TITLE }).catch(() => null)
@@ -450,7 +505,7 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: TITLE, focus: true })
     // The stretch the person last looked at is theirs to keep: only the page and the
     // row reset, so a panel reopened answers where it was left.
-    await update($, view, prev => ({ ...prev, tab: 'openspec', index: 0, isDetail: false, fullSection: null }))
+    await update($, view, prev => ({ ...prev, tab: 'spec', index: 0, isDetail: false, fullSection: null }))
 
     return { text: `${TITLE}已打开。` }
   })
@@ -540,12 +595,14 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
 
     if (e.agentId === undefined && wire !== 'AskUserQuestion') {
-      const isOk = !('deny' in ran && ran.deny !== undefined) && !('isError' in ran && ran.isError === true)
+      const isDenied = 'deny' in ran && ran.deny !== undefined
+      const isOk = !isDenied && !('isError' in ran && ran.isError === true)
       const finishedAt = await $.clock.now()
       const note = {
         at: callStartedAt,
         ms: finishedAt - callStartedAt,
         isOk,
+        isDenied,
         summary: summaryOf(wire, e as unknown as Record<string, unknown>),
         detail: argumentText(e),
         result: resultText(ran),
@@ -660,42 +717,37 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, changes)
-    const logged = await read($, calls)
-    const rounds = await read($, turns)
-    const total = list.reduce((sum, one) => sum + one.total, 0)
-    const done = list.reduce((sum, one) => sum + one.done, 0)
-    const doing = list.filter(one => one.hasTasks && one.done < one.total && !one.isArchived).length
+
+    // What the batch still owes: ready-to-archive plus archived-with-tasks-left.
+    const ready = list.filter(one => one.hasTasks && one.done >= one.total && !one.isArchived).length
     const broken = list.filter(one => one.hasTasks && one.done < one.total && one.isArchived).length
+    const awaiting = ready + broken
+    // Iteration 4 fills the roster; until then the band says nothing about agents.
+    const running = 0
     const room = Math.max(20, e.props.bodyColumns ?? 80)
     const live = await read($, ctx)
     const reading = ctxOf(live.tokens, live.window)
-
-    // The band's one job at the right edge is the context reading: counts step
-    // aside for it, and it steps aside only when the head alone fills the row.
-    const head = ` OpenSpec ${done}/${total}${doing > 0 ? ` ◉${doing}` : ''}${broken > 0 ? ` !${broken}` : ''}`
+    const ctxText = `CTX ${reading.text}`
+    const readyText = `待收尾 ${awaiting}`
+    const agentText = `代理 ${running}`
+    // CTX is the last thing to go: the counts step aside for it, and it steps
+    // aside only when the head alone fills the row.
     const budget = room - 9
-    const counts = `  | MCP ${logged.length} | 对话 ${rounds.length}`
-    const talk = `  | 对话 ${rounds.length}`
-    const ctxPart = `  | CTX ${reading.text}`
-    const isFull = cellsOf(head) + cellsOf(counts + ctxPart) <= budget
-    const isTalk = !isFull && cellsOf(head) + cellsOf(talk + ctxPart) <= budget
-    const isCtx = !isFull && !isTalk && cellsOf(head) + cellsOf(ctxPart) <= budget
+    let used = cellsOf(ctxText)
+    const isReady = awaiting > 0 && used + 3 + cellsOf(readyText) <= budget
+    used += isReady ? 3 + cellsOf(readyText) : 0
+    const isAgents = running > 0 && used + 3 + cellsOf(agentText) <= budget
 
-    // The narrow terminal's door: this line is what the pane would say, cut to fit.
-    // Every part of it is a plain child of the one Text, never a fragment: the JSX
-    // types here take a Text child list, not a node that happens to hold one.
     return (
       <Box flexDirection="row">
         <Button key="band-open" label="面板" dimColor onPress={() => $.ui.open({ id: PANE, title: TITLE, focus: true })} />
         <Text wrap="truncate-end">
           {' '}
-          <Text color="subtle">OpenSpec </Text>
-          <Text color="success">{`${done}/${total}`}</Text>
-          {doing > 0 ? <Text color="claude">{` ◉${doing}`}</Text> : null}
-          {broken > 0 ? <Text color="error">{` !${broken}`}</Text> : null}
-          {isFull ? <Text dimColor>{counts}</Text> : null}
-          {isTalk ? <Text dimColor>{talk}</Text> : null}
-          {isFull || isTalk || isCtx ? <Text color={reading.tone}>{ctxPart}</Text> : null}
+          {isReady ? <Text color="warning">{readyText}</Text> : null}
+          {isReady && isAgents ? <Text color="subtle">{' · '}</Text> : null}
+          {isAgents ? <Text color="claude">{agentText}</Text> : null}
+          {isReady || isAgents ? <Text color="subtle">{' · '}</Text> : null}
+          <Text color={reading.tone}>{ctxText}</Text>
         </Text>
       </Box>
     )
@@ -720,6 +772,7 @@ export const register: Register = (on, options) => {
         ctx: await read($, ctx),
         meter: await read($, meter),
         breakdown: await read($, breakdown),
+        editor: await read($, editor),
         prompts: await read($, prompts),
         branches: await read($, branches),
         diff: await read($, diff),
@@ -755,8 +808,11 @@ export const register: Register = (on, options) => {
                 : readTextOf($, `${root}/${rel}`)
             },
           ),
-        editFile: (repo: string, rel: string) =>
-          editFile($, repo, rel, editorOf(options), value => navigate($, { file: value })),
+        editFile: async (repo: string, rel: string) => {
+          const chosen = await read($, editor)
+
+          return editFile($, repo, rel, chosen.current, value => navigate($, { file: value }))
+        },
         openPrompts: async (next: PaneState) => {
           await withPrompts(async () => {
             const shelf = await readShelf($)
@@ -769,6 +825,27 @@ export const register: Register = (on, options) => {
         showBreakdown: async (next: PaneState) => {
           await loadBreakdown($)
           await navigateView($, next)
+        },
+        /** The editor choices are re-read on the way in; a choice already made stands. */
+        openEditor: async (next: PaneState) => {
+          await refreshEditor($)
+          await navigateView($, next)
+        },
+        chooseEditor: async (value: string) => {
+          try {
+            const result = await $.config.set({ key: 'bench.editor', value })
+
+            if (result.deny !== undefined) {
+              await flash($, `无法切换：${result.deny}`)
+
+              return
+            }
+
+            await update($, editor, prev => ({ ...prev, current: value, error: undefined }))
+            await flash($, `编辑器：${value}`)
+          } catch (thrown) {
+            await flash($, `无法切换：${String(thrown instanceof Error ? thrown.message : thrown)}`)
+          }
         },
         refreshBreakdown: () => loadBreakdown($),
         copyPrompt: async (id: string, text: string, surface: RenderSurface) => {

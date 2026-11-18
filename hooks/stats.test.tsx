@@ -5,7 +5,7 @@ import type { Engine } from 'claude-code/testing'
 import type { NoteSeen } from './conversation'
 import { attachTool, closeTurn, startTurn, statsOf, summaryOf } from './conversation'
 import { cellsOf } from './format'
-import { railOf } from './panes'
+import { migrateView, railOf, type PaneState } from './panes'
 
 const at = 1_700_000_000_000
 
@@ -165,7 +165,9 @@ test('a tab switch closes the drill and shows the new tab', async ($, on) => {
   // Quiet pages have no tabs: step back to the conversation list first.
   await ui.press({ key: 'back' })
   await ui.press({ key: 'back' })
-  await ui.press({ key: 'tab-sounds' })
+  // The sounds now sit behind the more page; the tab switch still closes the drill.
+  await ui.press({ key: 'tab-more' })
+  await ui.press({ key: 'more:more-sounds' })
 
   const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
@@ -492,5 +494,29 @@ test('at 80, 64 and 48 columns the rail never overflows, and drops from the righ
 
     expect(order).toEqual(['CTX', '5h', '7d', '$'].slice(0, order.length))
   }
+})
+
+test('an old five-tab page migrates onto the four tabs', () => {
+  const base: PaneState = {
+    tab: 'conversation',
+    index: 3,
+    isDetail: true,
+    fullSection: null,
+    path: ['x'],
+    filter: { repo: 'all', since: 'all', status: 'all' },
+    isBranchOpen: false,
+    pendingDelete: null,
+    flash: null,
+  }
+
+  expect(migrateView({ ...base, tab: 'openspec' as never })).toMatchObject({ tab: 'spec', index: 0, isDetail: false, path: [] })
+  // The old MCP tab reopens at the door MCP now lives behind.
+  expect(migrateView({ ...base, tab: 'mcp' as never })).toMatchObject({ tab: 'conversation', path: ['mcp'], isDetail: false })
+  expect(migrateView({ ...base, tab: 'sounds' as never })).toMatchObject({ tab: 'more', path: [] })
+  expect(migrateView({ ...base, tab: 'other' as never })).toMatchObject({ tab: 'more', path: [] })
+
+  // A page already on the four tabs is left as the person left it.
+  const kept: PaneState = { ...base, index: 2, path: ['failures'] }
+  expect(migrateView(kept)).toBe(kept)
 })
 

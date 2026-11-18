@@ -1,4 +1,4 @@
-# 其他 · prompt 收藏 · 测试
+# 更多 · 设置与 prompt 收藏 · 测试
 
 对应功能文档：[features/other](../../features/other/README.md)
 
@@ -33,12 +33,13 @@ claude plugin test . 2>&1 | grep -A30 other      # 页签与功能页
 | an add after a /clear keeps what the file holds, not the empty state | `/clear` 后没有 `session.start`：添加仍先读文件，不把已有收藏覆盖掉 |
 | a broken file reads as none, and the next add writes a sound one | 损坏文件按空处理，下一次写入是干净 JSON |
 
-### 页签与功能页（`hooks/other.test.tsx`，19 条）
+### 页签与功能页（`hooks/other.test.tsx`，20 条）
 
 | 测试 | 验的是什么 |
 |---|---|
-| the fifth tab is 其他, and 5 brings it up | 第 5 个页签存在，热键 `5` |
-| 其他 shows one feature door, and it opens a quiet page with a way back | 入口页只有 `prompt 收藏`；点入是安静页（无页签）；返回可用 |
+| the fourth tab is 更多, and 4 brings it up | 第 4 个页签存在，热键 `4` |
+| 更多 shows three doors, and the prompt one opens a quiet page with a way back | 入口页三行（prompt 收藏 / 提示音 / 编辑器）；点入是安静页（无页签）；返回可用 |
+| the editor row shows the current choice, and a choice is written to config | 编辑器行显示当前值；选 `vscode` 后写 `bench.editor=vscode`，返回后入口行同步 |
 | the saved prompts are read in order, each with its copy count | 行按次数排序，显示 `×N` |
 | a row copies the whole text, counts, and says so until it fades | 复制的是全文（含换行），次数 +1、写文件、页脚「已复制」；2.5 秒后提示消失 |
 | a failed copy says why and leaves the count alone | 复制失败显示原因，次数不变 |
@@ -49,9 +50,9 @@ claude plugin test . 2>&1 | grep -A30 other      # 页签与功能页
 | an empty shelf says how to add one | 空收藏显示 `/panel-prompt-add` 提示 |
 | a shelf entered after a /clear lists what the file holds | `/clear` 后没有 `session.start`：进入页面仍从文件读出全部收藏 |
 | a copy that cannot be saved still counts, and says why | 写文件失败时次数仍 +1，页脚显示「已复制（保存失败）」 |
-| the footer counts five tabs | 页脚显示 `1–5 页签` |
+| the footer counts four tabs | 页脚显示 `1–4 页签` |
 | a narrow shelf drops the copy counts before the words | 56 列保留 `×N`，55 列丢弃但保留文本与删除 |
-| five tabs still fit a 24-column row | `tabRowCellsOf` 在 24/40/48/56/80 列下都不超过列宽；24 列画出 5 个页签 |
+| four tabs still fit a 24-column row | `tabRowCellsOf` 在 24/40/48/56/80 列下都不超过列宽；24 列画出 4 个页签 |
 | a prompt row, confirmed or not, never crosses the width | `promptTailOf` 在 24/40/56/100 列、普通与确认态下，缩进+文本+尾部都不超过列宽 |
 | a partly broken file keeps the sound entries and says so | 部分条目损坏时保留好条目并显示「部分条目已损坏」 |
 | leaving the shelf drops a half-confirmed delete | 返回后重新进入，不残留「确认删除？」 |
@@ -67,7 +68,7 @@ claude plugin test . 2>&1 | grep -A30 other      # 页签与功能页
 ## 手工验证步骤
 
 1. 在终端执行 `/panel-prompt-add 帮我做一次代码评审`，确认回「已收藏」且面板没有被打开。
-2. `/panel` → 按 `5` → 点「prompt 收藏」，确认安静页出现该行。
+2. `/panel` → 按 `4` → 点「prompt 收藏」，确认安静页出现该行。
 3. 点这一行：页脚短暂「已复制」，`×1`；粘贴到任意输入框确认内容正确。
 4. 再添加 2–3 条，复制其中一条几次后返回再进入：顺序按次数重排。
 5. 点「删除」→「取消」确认条目还在；再点「删除」→「删除」确认消失。

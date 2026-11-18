@@ -65,8 +65,8 @@ async function mountOf($: Engine, columns = 100) {
 async function enteredAt($: Engine, columns: number) {
   const ui = await mountOf($, columns)
 
-  await ui.press({ key: 'tab-other' })
-  await ui.press({ key: 'other:prompt-favorites' })
+  await ui.press({ key: 'tab-more' })
+  await ui.press({ key: 'more:more-prompts' })
 
   return ui
 }
@@ -75,29 +75,31 @@ async function entered($: Engine) {
   return await enteredAt($, 100)
 }
 
-test('the fifth tab is 其他, and 5 brings it up', async ($, on) => {
+test('the fourth tab is 更多, and 4 brings it up', async ($, on) => {
   quiet(on)
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
 
   const ui = await mountOf($)
-  const tab = (await ui.find({ type: 'Button', key: 'tab-other' })) as { props?: { hotkey?: string } } | undefined
+  const tab = (await ui.find({ type: 'Button', key: 'tab-more' })) as { props?: { hotkey?: string } } | undefined
 
   expect(tab).toBeDefined()
-  expect(tab?.props?.hotkey).toBe('5')
+  expect(tab?.props?.hotkey).toBe('4')
 
   await ui.unmount()
 })
 
-test('其他 shows one feature door, and it opens a quiet page with a way back', async ($, on) => {
+test('更多 shows three doors, and the prompt one opens a quiet page with a way back', async ($, on) => {
   quiet(on)
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
 
   const ui = await mountOf($)
 
-  await ui.press({ key: 'tab-other' })
-  expect(await ui.find({ type: 'Button', key: 'other:prompt-favorites' })).toBeDefined()
+  await ui.press({ key: 'tab-more' })
+  expect(await ui.find({ type: 'Button', key: 'more:more-prompts' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'more:more-sounds' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'more:more-editor' })).toBeDefined()
 
-  await ui.press({ key: 'other:prompt-favorites' })
+  await ui.press({ key: 'more:more-prompts' })
 
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
   const tabs = (await ui.findAll({ type: 'Button' })) as { key?: string; props?: { key?: string } }[]
@@ -107,7 +109,7 @@ test('其他 shows one feature door, and it opens a quiet page with a way back',
   expect(tabs.some(one => String(one.props?.key ?? one.key ?? '').startsWith('tab-'))).toBe(false)
 
   await ui.press({ key: 'back' })
-  expect(await ui.find({ type: 'Button', key: 'other:prompt-favorites' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'more:more-prompts' })).toBeDefined()
 
   await ui.unmount()
 })
@@ -215,7 +217,7 @@ test('a copy does not reorder the page; entering it again does', async ($, on) =
   expect(aStillSecond).toBeGreaterThan(bStillFirst)
 
   await ui.press({ key: 'back' })
-  await ui.press({ key: 'other:prompt-favorites' })
+  await ui.press({ key: 'more:more-prompts' })
 
   const reentered = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? ''))
 
@@ -335,14 +337,14 @@ test('a copy that cannot be saved still counts, and says why', async ($, on) => 
   await ui.unmount()
 })
 
-test('the footer counts five tabs', async ($, on) => {
+test('the footer counts four tabs', async ($, on) => {
   quiet(on)
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
 
   const ui = await mountOf($)
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 
-  expect(page).toContain('1–5 页签')
+  expect(page).toContain('1–4 页签')
 
   await ui.unmount()
 })
@@ -368,15 +370,62 @@ test('a narrow shelf drops the copy counts before the words', async ($, on) => {
   await narrow.unmount()
 })
 
-test('five tabs still fit a 24-column row', async ($, on) => {
+test('the editor row shows the current choice, and a choice is written to config', async ($, on) => {
   quiet(on)
+
+  let chosen = '终端内'
+  const setCalls: string[] = []
+
+  on('config.list', () => ({
+    value: [{
+      key: 'bench.editor',
+      label: '打开文件的编辑器',
+      kind: 'choice',
+      value: chosen,
+      options: ['终端内', 'vscode', 'cursor'],
+      provider: { plugin: 'bench', tier: 'user' },
+      isLocked: false,
+    }],
+  }))
+  on('config.set', (_, e) => {
+    setCalls.push(`${String(e.key)}=${String(e.value)}`)
+    chosen = String(e.value)
+
+    return { value: chosen }
+  })
+
+  await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'tab-more' })
+
+  const pageOf = async () => (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+
+  expect(await pageOf()).toContain('编辑器  终端内')
+
+  await ui.press({ key: 'more:more-editor' })
+  expect(await pageOf()).toContain('vscode')
+
+  await ui.press({ key: 'editor-option:vscode' })
+  expect(setCalls).toEqual(['bench.editor=vscode'])
+  expect(await pageOf()).toContain('▸ vscode')
+
+  // Back on the more page, the row already reads the new choice.
+  await ui.press({ key: 'back' })
+  expect(await pageOf()).toContain('编辑器  vscode')
+
+  await ui.unmount()
+})
+
+test('four tabs still fit a 24-column row', async ($, on) => {  quiet(on)
   await $.session.start({ cwd: '/nowhere', surface: 'terminal', isInteractive: true })
 
   const ui = await mountOf($, 24)
   const tabs = ((await ui.findAll({ type: 'Button' })) as { key?: string; props?: { key?: string } }[]).filter(one =>
     String(one.props?.key ?? one.key ?? '').startsWith('tab-'),
   )
-  expect(tabs).toHaveLength(5)
+  expect(tabs).toHaveLength(4)
 
   // The same rule the renderer uses: labels, chrome, gaps and the count.
   for (const columns of [24, 40, 48, 56, 80]) {
@@ -417,7 +466,7 @@ test('leaving the shelf drops a half-confirmed delete', async ($, on) => {
 
   await ui.press({ key: 'prompt-del:b' })
   await ui.press({ key: 'back' })
-  await ui.press({ key: 'other:prompt-favorites' })
+  await ui.press({ key: 'more:more-prompts' })
 
   const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
 

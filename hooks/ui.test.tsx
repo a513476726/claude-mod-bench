@@ -146,7 +146,7 @@ test('a page is flat: rules are full width and no card edge remains', async ($, 
     surface: 'terminal',
   } as never)
 
-  for (const tab of ['tab-openspec', 'tab-conversation', 'tab-mcp', 'tab-sounds']) {
+  for (const tab of ['tab-conversation', 'tab-spec', 'tab-agent', 'tab-more']) {
     await ui.press({ key: tab })
 
     const rows = (await ui.findAll({ type: 'Text' })).map(one => String((one as { text?: string }).text ?? '')).filter(one => one !== ' ')

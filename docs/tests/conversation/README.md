@@ -74,6 +74,22 @@ claude plugin test . 2>&1 | grep -A20 folding        # 只看折叠
 | the rounds are the newest first | 两轮按时间倒序 |
 | a question and a typed turn lead their rows with their own tags | `AskUserQuestion` 开一轮标 `提问`，人提交的一轮标 `输入`；预置文本 `Base directory` 不成为一轮 |
 
+### 失败归因与 MCP 入口（`hooks/failure.test.tsx`、`hooks/interaction.test.tsx`、`hooks/register.test.tsx`）
+
+| 测试 | 验的是什么 |
+|---|---|
+| a command is normalized by its whitespace, never rewritten | `normalizeCommand` 只去首尾空白、压缩空白 |
+| only failed calls are failures, in the order they ran | `failuresOf` 只取 `isOk === false`，按时间排序 |
+| failures group by tool, most failures first, each with its last error | `groupFailures` 次数降序、同次数最近优先，带最后错误摘要 |
+| the same command three times reads as looping, twice does not | 同一归一化命令 3 次为真，2 次为假 |
+| the same tool and error three times reads as looping, a different error breaks it | 同一工具 + 同一错误 3 次为真；不同错误打断 |
+| failures are counted, grouped by tool, and drilled to the call | 统计轨道 `失败 3 次` → 工具行 → 失败调用 → 调用详情（`结果 失败` + 参数） |
+| the same command three times is marked as going in circles | 会话行尾出现 `可能在打转`，不改变状态标签 |
+| the four tabs carry the four hotkeys, and no old tab survives | 四页签与 `1–4` 热键；没有 MCP / 提示音顶层页签；代理页空态 |
+| an MCP call is kept under the server that served it | MCP 三层下钻与逐层返回 |
+| a built-in tool is not kept as an MCP call | 内置工具不进 MCP 列表，入口页给空态 |
+| an old five-tab page migrates onto the four tabs | 旧 `tab` 值迁移：`openspec→spec`、`mcp→conversation+path`、`sounds/other→more` |
+
 ### 折叠（`hooks/folding.test.tsx`）
 
 | 测试 | 验的是什么 |

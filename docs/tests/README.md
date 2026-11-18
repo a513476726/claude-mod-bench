@@ -6,6 +6,8 @@
 
 | 日期 | 变更 | 新增/修改测试 | 结果 |
 |---|---|---|---|
+| 2026-11-18 | `bench-iteration-2-layout-failures` | 新增 `failure`(5，新文件：归一化、失败聚合、循环检测)；改 `register`(+2：四页签/热键、MCP 逐层)、`stats`(+1：页面迁移)、`interaction`(+2：失败归因、打转提示)、`other`(+1：编辑器)；`items` 改写 MCP 下钻 | 173 → **183 条全绿**；`tsc` 0 错误 |
+| 2026-11-18 | `bench-iteration-1-meter` | 新增 `meter`(5，新文件)；`stats`(+4：成本/额度、缺账本、收缩顺序、宽度)、`register`(+4：启动读数、measure、turn、无账本)、`interaction`(+3：构成页、空态、窄屏) | 155 → **173 条全绿**；`tsc` 0 错误 |
 | 2026-11-18 | `prompt-favorites` | 新增 `prompts`(6，新文件)、`other`(18，新文件：含损坏文件/空态/保存失败/窄屏确认/宽度/计时器)；`register`(+4：命令添加/空参数/已存在/损坏文件) | 127 → **155 条全绿**；`tsc` 0 错误 |
 | 2026-11-18 | `token-km-ctx-percent` | 新增 `format`(3，新文件)；`stats`(+4：K/M、CTX 阈值、窄屏、下钻)；`register`(+6：初始读数、measure、turn 兜底、不可点、横条颜色、横条丢弃顺序) | 114 → **127 条全绿**；`tsc` 0 错误 |
 | 2026-11-17 | `direction-d-tagged-panel` | 重写 `ui`(14)、`items`(6，新文件)、`interaction`(18)、`grouping`(2)、`folding`(13)、`conversation`(13)、`branch`(5)、`stats`(10)、`scan`(14)、`register`(4)、`diff`(9)、`filter`(6) | 92 → **114 条全绿**；`tsc` 0 错误 |
@@ -24,18 +26,19 @@
 
 | 页签 | 测试文档 | 自动化条数 | 主要文件 |
 |---|---|---|---|
-| OpenSpec | [tests/openspec](openspec/README.md) | 31 | `scan.test.tsx`(14)、`interaction.test.tsx`(其中 8 条)、`filter.test.tsx`(6)、`grouping.test.tsx`(2)、`items.test.tsx`(其中 1 条) |
+| 变更（OpenSpec） | [tests/openspec](openspec/README.md) | 31 | `scan.test.tsx`(14)、`interaction.test.tsx`(其中 8 条)、`filter.test.tsx`(6)、`grouping.test.tsx`(2)、`items.test.tsx`(其中 1 条) |
 | 分支区 | [tests/branch](branch/README.md) | 21 | `diff.test.tsx`(9)、`interaction.test.tsx`(其中 7 条)、`branch.test.tsx`(5) |
-| 对话 | [tests/conversation](conversation/README.md) | 40 | `conversation.test.tsx`(13)、`folding.test.tsx`(13)、`stats.test.tsx`(14) |
+| 会话 | [tests/conversation](conversation/README.md) | 45 | `conversation.test.tsx`(13)、`folding.test.tsx`(13)、`stats.test.tsx`(19) |
+| 失败归因 | [tests/conversation](conversation/README.md) | 5 | `failure.test.tsx`(5) |
 | MCP | [tests/mcp](mcp/README.md) | 3 | `register.test.tsx`(其中 2 条)、`items.test.tsx`(1) |
 | 提示音 | [tests/sounds](sounds/README.md) | 1 | `interaction.test.tsx`(1) |
 | ~~宠物~~ | [tests/pet](pet/README.md) | 0 | 2026-11-06 起移除 |
-| 启动与横条 | 见下 | 8 | `register.test.tsx`（含 6 条 CTX 读数） |
+| 启动与横条 | 见下 | 10 | `register.test.tsx`（含 6 条 CTX 读数、2 条横条收缩） |
 | 界面构件 | [tests/ui](ui/README.md) | 21 | `ui.test.tsx`(14)、`items.test.tsx`(其中 4 条预算辅助)、`format.test.tsx`(3) |
-| 其他 | [tests/other](other/README.md) | 28 | `other.test.tsx`(18)、`register.test.tsx`(其中 4 条命令)、`prompts.test.tsx`(6) |
+| 更多 / prompt 收藏 | [tests/other](other/README.md) | 30 | `other.test.tsx`(20)、`register.test.tsx`(其中 4 条命令)、`prompts.test.tsx`(6) |
 | 跨页签返回/滚动 | `interaction.test.tsx` | 2 | 返回浮层位置、滚动高度记录 |
 
-合计 **155 条**，按测试文件：`scan` 14 + `filter` 6 + `grouping` 2 + `interaction` 18 + `register` 14 + `conversation` 13 + `folding` 13 + `branch` 5 + `stats` 14 + `diff` 9 + `items` 6 + `ui` 14 + `format` 3 + `prompts` 6 + `other` 18。
+合计 **183 条**，按测试文件：`scan` 14 + `filter` 6 + `grouping` 2 + `interaction` 23 + `register` 20 + `conversation` 13 + `folding` 13 + `branch` 5 + `stats` 19 + `diff` 9 + `items` 6 + `ui` 14 + `format` 3 + `prompts` 6 + `other` 20 + `meter` 5 + `failure` 5。
 
 「启动与横条」10 条：页签标题与空态、AbovePrompt 的总数与入口，以及 6 条上下文读数（初始、measure、turn 兜底、不可点、横条颜色、横条丢弃顺序）；另有 4 条 `panel-prompt-add` 命令用例计入「其他」。
 

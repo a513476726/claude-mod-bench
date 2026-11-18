@@ -1,11 +1,12 @@
 import type { Call, SoundSettings, SpecChange, ToolNote, Turn } from '../types'
 import { ageColOf, agoOf, cellsOf, endClip, kmOf, padCells, spanOf, timeOf, whenOf } from './format'
 import { isTroubled, statsOf } from './conversation'
+import { failuresOf, groupFailures, isLooping, isToolLooping } from './failure'
 import { groupOf, type Group } from './scan'
 import { STATUS_TAG, type Tone } from './ui'
 
 /** The page and tab the detail is read from. */
-export type TabId = 'openspec' | 'conversation' | 'mcp' | 'sounds' | 'other'
+export type TabId = 'conversation' | 'spec' | 'agent' | 'more'
 
 
 /** The order the stretches stand in, and what each is called on its heading. */
@@ -59,6 +60,10 @@ export type Item = {
   summary?: string
   count?: number
   last?: string
+  /** What this row adds to the drill path; the id itself when it names the level. */
+  pathKey?: string
+  /** A short caution at the row's end (`可能在打转`), never a status word. */
+  hint?: string
   /** The switch a row flips, where it is one: the page reads it instead of the id. */
   sound?: keyof SoundSettings
 }
@@ -205,8 +210,15 @@ export function filterOf(changes: SpecChange[], filter: SpecFilter, now: number)
 
 /** The rows each tab stands for, the newest first where time orders them; the
  * OpenSpec page is read through the person's filter. */
-export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILTER, now = Date.now(), width = 72): Item[] {
-  if (tab === 'openspec') {
+export function itemsOf(
+  tab: TabId,
+  stored: Stored,
+  filter: SpecFilter = NO_FILTER,
+  now = Date.now(),
+  width = 72,
+  editor = '终端内',
+): Item[] {
+  if (tab === 'spec') {
     return changeItems(filterOf(stored.changes, filter, now), width)
   }
 
@@ -214,17 +226,19 @@ export function itemsOf(tab: TabId, stored: Stored, filter: SpecFilter = NO_FILT
     return conversationItems(stored.turns)
   }
 
-  if (tab === 'mcp') {
-    return callItems(stored.calls, width)
+  if (tab === 'agent') {
+    // Nothing is drawn until iteration 4 fills the roster; the page's own empty
+    // state is the only row it has.
+    return []
   }
 
-  if (tab === 'other') {
-    // One door for now: the prompt shelf behind it.
-    return [{ id: 'prompt-favorites', line: 'prompt 收藏', name: 'prompt 收藏', detailLines: [] }]
-  }
-
-  // The sound tab is four switches: each row flips one, and none opens a page.
-  return soundItems(stored.sounds)
+  // The more page: three doors, names only — the settings behind them carry their
+  // own values.
+  return [
+    { id: 'more-prompts', line: 'prompt 收藏', name: 'prompt 收藏', detailLines: [] },
+    { id: 'more-sounds', line: '提示音', name: '提示音', detailLines: [] },
+    { id: 'more-editor', line: `编辑器  ${editor}`, name: '编辑器', detailLines: [] },
+  ]
 }
 
 /** What a drill-down level draws: where it stands, its rows, and what an empty one says. */
@@ -295,7 +309,7 @@ export function callDetailOf(turns: Turn[], id: string): { title: string; lines:
     title: note.summary,
     lines: [
       `时间: ${whenOf(note.at)}`,
-      `结果: ${note.isOk ? '成功' : '失败'}`,
+      `结果: ${note.isOk ? '成功' : note.isDenied === true ? '拒绝' : '失败'}`,
       `耗时: ${note.ms >= 0 ? `${note.ms}ms` : '—'}`,
       `摘要: ${note.summary}`,
       '',
@@ -316,6 +330,73 @@ export function callDetailOf(turns: Turn[], id: string): { title: string; lines:
 export function drillItemsOf(tab: TabId, stored: Stored, path: string[]): Drill {
   const top = path[path.length - 1] ?? ''
   const turns = stored.turns
+
+  // MCP: the servers, then one server's calls. A call's own page is drawn by the
+  // pane from its id; the level here is only the list it came from.
+  if (top === 'mcp' && path.length === 1) {
+    const items = callItems(stored.calls, 100)
+
+    return {
+      title: `MCP · ${items.length} 个服务器`,
+      empty: '本次会话没有 MCP 调用。',
+      items,
+    }
+  }
+
+  if (path[0] === 'mcp' && path.length === 2) {
+    const server = path[1] ?? ''
+    const calls = stored.calls.filter(one => one.server === server).sort((a, b) => b.at - a.at)
+
+    return {
+      title: `${server} · ${calls.length} 次`,
+      empty: `本次会话没有调用 ${server}`,
+      items: calls.map(one => ({
+        id: `mcp:${server}:${one.id}`,
+        pathKey: one.id,
+        line: `${timeOf(one.at)} ${one.isOk ? '成功' : '失败'} ${one.name} ${one.ms >= 0 ? `${one.ms}ms` : '…'}`,
+        detailLines: [],
+      })),
+    }
+  }
+
+  // Failures: the tools that failed, then one tool's failed calls. A call's own
+  // page is drawn from the same `call:` id the conversation drill uses.
+  if (top === 'failures' && path.length === 1) {
+    const rows = groupFailures(turns)
+
+    return {
+      title: `失败 · ${rows.length} 种工具`,
+      empty: '本次会话没有工具失败。',
+      items: rows.map(row => ({
+        id: `failure:${row.tool}`,
+        pathKey: row.tool,
+        line: `${row.tool} ${row.count} 次 · ${row.lastError}`,
+        detailLines: [],
+        ...(isToolLooping(turns, row.tool) ? { hint: '可能在打转' } : {}),
+      })),
+    }
+  }
+
+  if (path[0] === 'failures' && path.length === 2) {
+    const tool = path[1] ?? ''
+    const failed = turns
+      .flatMap(turn => failuresOf(turn).filter(one => one.tool === tool).map(one => ({ turn, note: one.note })))
+      .sort((a, b) => b.note.at - a.note.at)
+
+    return {
+      title: `${tool} · 失败 ${failed.length} 次`,
+      empty: `本次会话没有 ${tool} 的失败`,
+      items: failed.map(({ turn, note }) => {
+        const at0 = turn.tools.find(one => one.name === tool)?.notes.indexOf(note) ?? 0
+
+        return {
+          id: `call:${turn.id}:${tool}:${at0}`,
+          line: `${timeOf(note.at)} ${note.summary}`,
+          detailLines: [],
+        }
+      }),
+    }
+  }
 
   if (top === STATS_KEYS.models) {
     const stats = statsOf(turns)
@@ -498,6 +579,7 @@ function callItems(all: Call[], width: number): Item[] {
       count: group.length,
       name: server,
       last: last === undefined ? '—' : timeOf(last.at),
+      pathKey: server,
       line: `${tag}  ${server}  ${group.length} 次${last === undefined ? '' : ` · 最近 ${timeOf(last.at)}`}`,
       // The calls' bodies are built only when this server's detail is opened.
       get detailLines(): string[] {
@@ -525,7 +607,8 @@ export const SOUNDS: { key: keyof SoundSettings; label: string }[] = [
   { key: 'error', label: '任务异常' },
 ]
 
-function soundItems(settings: SoundSettings): Item[] {
+/** The four switches as rows; the more page's sound page draws them. */
+export function soundItemsOf(settings: SoundSettings): Item[] {
   return SOUNDS.map(({ key, label }) => {
     const on = settings[key]
 
@@ -560,6 +643,7 @@ function conversationItems(turns: Turn[]): Item[] {
         line: `${tag}  ${timeOf(one.at)}  ${first}`,
         detailLines: [],
         sections: turnSections(one),
+        ...(isLooping([one]) ? { hint: '可能在打转' } : {}),
       }
     })
 }

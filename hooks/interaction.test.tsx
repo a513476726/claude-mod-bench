@@ -396,9 +396,10 @@ test('the sounds page holds four switches, a press flips one once, and each prev
 
   const ui = await mountOf($)
 
-  // There is no pet tab any more; the fourth tab is the sound switches.
+  // Sounds live behind the more page now, not under a tab of their own.
   expect(await ui.find({ type: 'Button', key: 'tab-pet' })).toBeUndefined()
-  await ui.press({ key: 'tab-sounds' })
+  await ui.press({ key: 'tab-more' })
+  await ui.press({ key: 'more:more-sounds' })
 
   const label = (one: unknown) => String((one as { props?: { label?: string } } | undefined)?.props?.label ?? '')
 
@@ -653,6 +654,64 @@ test('the status tag is the row\'s only colour', async ($, on) => {
   await ui.unmount()
 })
 
+/** A turn with a few tool calls, each failing when `fails` says so. */
+async function callsIn($: Engine, on: On, fails: boolean, commands: string[]) {
+  on('tool.call', () => (fails ? { result: {}, text: 'same error', isError: true } : { result: {}, text: 'ok' }))
+
+  await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '跑几条命令' } as never).catch(() => undefined)
+
+  for (const [at, command] of commands.entries()) {
+    await $.tool.call({ tool: 'Bash', tool_use_id: `c${at}`, command })
+  }
+}
+
+test('failures are counted, grouped by tool, and drilled to the call', async ($, on) => {
+  world(on)
+  await callsIn($, on, true, ['npx tsc', 'npm test'])
+
+  // A Read that failed too, on the same round.
+  await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: 'a.ts' })
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'tab-conversation' })
+
+  const failures = (await ui.find({ type: 'Button', key: 'stat-failures' })) as { props?: { label?: string } } | undefined
+
+  expect(String(failures?.props?.label ?? '')).toContain('失败 3 次')
+
+  await ui.press({ key: 'stat-failures' })
+
+  const page = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  expect(page).toContain('Bash 2 次 · same error')
+  expect(page).toContain('Read 1 次 · same error')
+
+  await ui.press({ key: 'drill-failure:Bash' })
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('Bash · 失败 2 次')
+
+  // One failed call's own page says it failed, with its arguments.
+  await ui.press({ key: 'drill-call:1700000000000-0:Bash:0' })
+
+  const detail = (await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')
+  expect(detail).toMatch(/结果\s+失败/)
+  expect(detail).toContain('参数')
+
+  await ui.unmount()
+})
+
+test('the same command three times is marked as going in circles', async ($, on) => {
+  world(on)
+  await callsIn($, on, false, ['npm test', 'npm test', 'npm test'])
+
+  const ui = await mountOf($)
+
+  await ui.press({ key: 'tab-conversation' })
+
+  expect((await ui.findAll({ type: 'Text' })).map(one => String(one.text ?? '')).join('\n')).toContain('可能在打转')
+
+  await ui.unmount()
+})
 /** A square of the engine's context grid, as the breakdown page reads it. */
 function square(categoryName: string, tokens: number, percentage: number) {
   return { categoryName, tokens, percentage, color: 'inactive', isFilled: tokens > 0, squareFullness: 1 }
@@ -774,7 +833,7 @@ test('an engine without a breakdown says so, and keeps its way back', async ($, 
 test('the breakdown wraps its names at 80, 40 and 24 columns without overflowing', async ($, on) => {
   world(on)
   usageWorld(on, () => [
-    { label: 'System prompt with a very long category name', tokens: 120_000, percent: 12 },
+    { label: 'System prompt with a very long category name', tokens: 120_000, percent: 100 },
     { label: 'Messages', tokens: 420_000, percent: 42 },
   ])
   await $.session.start({ cwd: '/ws/sales-platform', surface: 'terminal', isInteractive: true })

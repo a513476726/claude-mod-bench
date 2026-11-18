@@ -2,8 +2,9 @@ import type { EngineInterface, PluginOptions, RenderElement, RenderSurface, UiPr
 
 import type { Branch, Meter, ScanState, SoundSettings } from '../types'
 import { statsOf } from './conversation'
-import { editorOf, type DiffGroup, type DiffShown, type FileShown } from './files'
-import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, wrapKeep } from './format'
+import { type DiffGroup, type DiffShown, type FileShown } from './files'
+import { cellsOf, clipBranch, ctxOf, endClip, fitBranch, fold, kmOf, padCells, whenOf, wrapKeep } from './format'
+import { failuresOf, groupFailures, isLooping } from './failure'
 import { quotaOf, usdOf, type BreakdownRow, type BreakdownStore } from './meter'
 import {
   DETAIL_BUDGET,
@@ -13,7 +14,9 @@ import {
   TOOLS_ROW,
   callDetailOf,
   drillItemsOf,
+  headLineOf,
   itemsOf,
+  soundItemsOf,
   takeRows,
   tallyOf,
   type DetailSection,
@@ -64,11 +67,10 @@ export function tabRowCellsOf(columns: number, count: number): number {
 }
 
 export const TABS = [
-  { id: 'openspec', label: 'OpenSpec', short: 'Spec', hint: '1' },
-  { id: 'conversation', label: '对话', short: '对话', hint: '2' },
-  { id: 'mcp', label: 'MCP', short: 'MCP', hint: '3' },
-  { id: 'sounds', label: '提示音', short: '音', hint: '4' },
-  { id: 'other', label: '其他', short: '其他', hint: '5' },
+  { id: 'conversation', label: '会话', short: '会话', hint: '1' },
+  { id: 'spec', label: '变更', short: '变更', hint: '2' },
+  { id: 'agent', label: '代理', short: '代理', hint: '3' },
+  { id: 'more', label: '更多', short: '更多', hint: '4' },
 ] as const
 
 /** The OpenSpec row at its widest; narrower pages drop columns from the right. */
@@ -216,6 +218,8 @@ export type PaneData = {
   breakdown: BreakdownStore
   /** The saved prompts, in display order. */
   prompts: PromptStore
+  /** The editor the plugin is set to use, and the choices its config row offers. */
+  editor: { current: string; options: string[]; error?: string }
   branches: Branch[]
   diff: DiffShown | null
   file: FileShown | null
@@ -223,9 +227,33 @@ export type PaneData = {
   scroll: { contentRows: number; page: string }
 }
 
+/**
+ * A stored page from the five-tab build, moved onto today's four: the old
+ * OpenSpec tab becomes 变更, the old MCP tab becomes 会话 with its MCP door
+ * open, and the old 提示音 / 其他 tabs become 更多. A page already on the four
+ * tabs is left exactly as it was.
+ */
+export function migrateView(stored: PaneState): PaneState {
+  const tab = stored.tab as string
+  const base = { ...stored, index: 0, isDetail: false, fullSection: null }
+
+  if (tab === 'openspec') {
+    return { ...base, tab: 'spec', path: [] }
+  }
+
+  if (tab === 'mcp') {
+    return { ...base, tab: 'conversation', path: ['mcp'] }
+  }
+
+  if (tab === 'sounds' || tab === 'other') {
+    return { ...base, tab: 'more', path: [] }
+  }
+
+  return stored
+}
+
 /** The page an offset belongs to: a drill level, a diff file, a full body, a list. */
-export function pageKeyOf(state: PaneState, diff: DiffShown | null, file: FileShown | null): string {
-  if (file !== null) {
+export function pageKeyOf(state: PaneState, diff: DiffShown | null, file: FileShown | null): string {  if (file !== null) {
     return `file:${file.path}`
   }
 
@@ -273,6 +301,10 @@ export type PaneActions = {
   showBreakdown: (next: PaneState) => Promise<void>
   /** Read the context breakdown again, staying on its page. */
   refreshBreakdown: () => Promise<void>
+  /** Read the editor choices, then open the editor page. */
+  openEditor: (next: PaneState) => Promise<void>
+  /** Set the plugin's editor option, keeping the page where it is. */
+  chooseEditor: (value: string) => Promise<void>
   copyPrompt: (id: string, text: string, surface: RenderSurface) => Promise<void>
   askDelete: (id: string) => Promise<void>
   cancelDelete: () => Promise<void>
@@ -303,9 +335,9 @@ export async function drawPane(
   const contentRows = data.scroll.page === page ? data.scroll.contentRows : 0
   const rows = Math.max(3, e.props.scroll.bodyRows)
   const columns = Math.max(24, e.props.bodyColumns)
-  const isSpec = state.tab === 'openspec'
+  const isSpec = state.tab === 'spec'
   const now = await $.clock.now()
-  const all = itemsOf(state.tab, stored, state.filter, now, Math.max(8, columns - SP.inline))
+  const all = itemsOf(state.tab, stored, state.filter, now, Math.max(8, columns - SP.inline), data.editor.current)
   const counts = isSpec ? tallyOf(all) : new Map<Group, number>()
   const items = isSpec && state.filter.status !== 'all'
     ? all.filter(one => one.group === state.filter.status)
@@ -572,27 +604,38 @@ export async function drawPane(
   }
 
 
-  /** The one door the 其他 tab opens to. */
-  const otherRow = (item: Item, at: number) => (
-    <Box key={`other-${item.id}`} flexDirection="row">
-      <Button
-        key={`other:${item.id}`}
-        plain
-        label={item.line}
-        onPress={() => void actions.openPrompts({ ...state, path: ['prompts'], index: 0, isDetail: false })}
-      >
-        <Text wrap="truncate-end">
-          <Text>{' '.repeat(SP.inline)}</Text>
-          <Text color={at === index ? INK.accent : undefined}>{at === index ? '▸ ' : '  '}</Text>
-          <Text bold={at === index}>{item.name ?? item.line}</Text>
-        </Text>
-      </Button>
-    </Box>
-  )
+  /** One door on the more page: the prompt shelf, the sounds, or the editor. */
+  const moreRow = (item: Item, at: number) => {
+    const open = () => {
+      if (item.id === 'more-prompts') {
+        return actions.openPrompts({ ...state, path: ['prompts'], index: 0, isDetail: false })
+      }
+
+      if (item.id === 'more-sounds') {
+        return actions.navigate({ ...state, path: ['sounds'], index: 0, isDetail: false })
+      }
+
+      return actions.openEditor({ ...state, path: ['editor'], index: 0, isDetail: false })
+    }
+
+    return (
+      <Box key={`more-${item.id}`} flexDirection="row">
+        <Button key={`more:${item.id}`} plain label={item.line} onPress={() => void open()}>
+          <Text wrap="truncate-end">
+            <Text>{' '.repeat(SP.inline)}</Text>
+            <Text color={at === index ? INK.accent : undefined}>{at === index ? '▸ ' : '  '}</Text>
+            <Text bold={at === index}>{item.name ?? item.line}</Text>
+            {item.id === 'more-editor' ? <Text color={INK.muted}>{`  ${data.editor.current}`}</Text> : null}
+          </Text>
+        </Button>
+      </Box>
+    )
+  }
 
   /** The session rail: one summary line, or two when the pane can afford it. */
   const statsRail = () => {
     const stats = statsOf(stored.turns)
+    const failures = groupFailures(stored.turns).reduce((sum, one) => sum + one.count, 0)
     const rounds = stats.models.reduce((sum, one) => sum + one.turns, 0)
     const reading = ctxOf(data.ctx.tokens, data.ctx.window)
     const tokensOf = (one: typeof stats.total, isShort: boolean) =>
@@ -640,17 +683,49 @@ export async function drawPane(
         {rows < 20 ? null : (
           <Box flexDirection="row">
             <Text>{' '.repeat(SP.inline)}</Text>
-            <Button key="stat-tools" label={`工具 ${stats.toolKinds} 种 · ${stats.toolCalls} 次`} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.tools], index: 0, isDetail: false })}>
+            <Button
+              key="stat-tools"
+              label={columns < 40 ? `工具 ${stats.toolCalls} 次` : `工具 ${stats.toolKinds} 种 · ${stats.toolCalls} 次`}
+              plain
+              onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.tools], index: 0, isDetail: false })}
+            >
               <Text>
                 <Text color={INK.accent}>工具</Text>
-                <Text color={INK.muted}>{` ${stats.toolKinds} 种 · ${stats.toolCalls} 次`}</Text>
+                <Text color={INK.muted}>{columns < 40 ? ` ${stats.toolCalls} 次` : ` ${stats.toolKinds} 种 · ${stats.toolCalls} 次`}</Text>
               </Text>
             </Button>
-            <Text color={INK.frame}>{'  ·  '}</Text>
-            <Button key="stat-commands" label={`命令 ${stats.commandCalls} 次`} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.commands], index: 0, isDetail: false })}>
+            {columns < 56 ? null : (
+              <>
+                <Text color={INK.frame}>{'  ·  '}</Text>
+                <Button key="stat-commands" label={`命令 ${stats.commandCalls} 次`} plain onPress={() => void actions.navigate({ ...state, path: [STATS_KEYS.commands], index: 0, isDetail: false })}>
+                  <Text>
+                    <Text color={INK.accent}>命令</Text>
+                    <Text color={INK.muted}>{` ${stats.commandCalls} 次`}</Text>
+                  </Text>
+                </Button>
+              </>
+            )}
+            {failures === 0 || columns < 40 ? null : (
+              <>
+                <Text color={INK.frame}>{'  ·  '}</Text>
+                <Button key="stat-failures" label={`失败 ${failures} 次`} plain onPress={() => void actions.navigate({ ...state, path: ['failures'], index: 0, isDetail: false })}>
+                  <Text>
+                    <Text color={INK.accent}>失败</Text>
+                    <Text color={INK.muted}>{` ${failures} 次`}</Text>
+                  </Text>
+                </Button>
+              </>
+            )}
+            <Text color={INK.frame}>{columns < 40 ? ' · ' : '  ·  '}</Text>
+            <Button
+              key="stat-mcp"
+              label={`MCP ${stored.calls.length} 次`}
+              plain
+              onPress={() => void actions.navigate({ ...state, path: ['mcp'], index: 0, isDetail: false })}
+            >
               <Text>
-                <Text color={INK.accent}>命令</Text>
-                <Text color={INK.muted}>{` ${stats.commandCalls} 次`}</Text>
+                <Text color={INK.accent}>MCP</Text>
+                <Text color={INK.muted}>{` ${stored.calls.length} 次`}</Text>
               </Text>
             </Button>
           </Box>
@@ -707,7 +782,8 @@ export async function drawPane(
     const cols = convColsOf(columns)
     const widths = widthsOf(cols, columns - SP.inline)
     const time = padCells(endClip(item.time ?? '', widths[2] ?? 5), widths[2] ?? 5)
-    const summary = endClip(item.summary ?? item.line, widths[3] ?? 1)
+    const hint = item.hint === undefined ? '' : ` · ${item.hint}`
+    const summary = endClip(item.summary ?? item.line, Math.max(1, (widths[3] ?? 1) - cellsOf(hint)))
     const gap = ' '.repeat(SP.group)
 
     return (
@@ -720,29 +796,7 @@ export async function drawPane(
             <Text color={item.tone}>{padCells(item.tag ?? '输入', tagWidth(columns))}</Text>
             <Text color={INK.muted}>{`${gap}${time}${gap}`}</Text>
             <Text bold={selected}>{summary}</Text>
-          </Text>
-        </Button>
-      </Box>
-    )
-  }
-
-  /** One MCP server row. */
-  const mcpRow = (item: Item, at: number) => {
-    const selected = at === index
-    const tag = padCells(item.tag ?? 'MCP', tagWidth(columns))
-    const count = padCells(`${item.count ?? 0} 次`, 6)
-    const gap = ' '.repeat(SP.group)
-
-    return (
-      <Box key={`mcp-${item.id}`} flexDirection="row">
-        <Button key={`row-${item.id}`} plain label={item.line} onPress={() => void actions.navigate({ ...state, index: at, isDetail: true })}>
-          <Text wrap="truncate-end">
-            <Text>{' '.repeat(SP.inline)}</Text>
-            <Text color={selected ? INK.accent : undefined}>{selected ? '▸ ' : '  '}</Text>
-            <Text>{gap}</Text>
-            <Text color={item.tone}>{tag}</Text>
-            <Text color={INK.muted}>{`${gap}${count}${gap}`}</Text>
-            <Text bold={selected}>{item.name ?? item.line}</Text>
+            {hint === '' ? null : <Text color={INK.muted}>{hint}</Text>}
           </Text>
         </Button>
       </Box>
@@ -864,11 +918,14 @@ export async function drawPane(
     const inner = Math.max(8, columns - SP.inline * 2)
     const nameRoom = inner - cellsOf(tail) - SP.group
 
-    // Too narrow for a name column: the name gets its own row, the figures the next.
+    // Too narrow for a name column: the name gets its own row(s), the figures the
+    // next. The name still wraps to the page — a long category never overflows.
     if (nameRoom < 8) {
       return (
         <Box key={isTotal ? 'breakdown-total' : `breakdown-${row.label}`} flexDirection="column">
-          <Text>{`${' '.repeat(SP.inline)}${row.label}`}</Text>
+          {wrapKeep(row.label, Math.max(8, columns - SP.inline), 0).map((line, at) => (
+            <Text key={`breakdown-${row.label}-${at}`}>{`${' '.repeat(SP.inline)}${line}`}</Text>
+          ))}
           <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${tail}`}</Text>
         </Box>
       )
@@ -895,11 +952,15 @@ export async function drawPane(
    */
   const breakdownPage = () => {
     const store = data.breakdown
-    const isMissing = store.error !== undefined || store.rows.length === 0
+    const isMissing = store.error !== undefined || !store.isLoaded
 
     return quietPage('上下文构成', (
       <Box flexDirection="column">
-        {store.error === undefined ? null : noteAt(store.error)}
+        {store.error !== undefined
+          ? noteAt(store.error)
+          : !store.isLoaded
+            ? noteAt('尚未读取构成，点「刷新」重试。')
+            : null}
         {isMissing ? null : (
           <>
             {store.rows.map(row => breakdownLine(row, false))}
@@ -921,17 +982,119 @@ export async function drawPane(
     })
   }
 
+  /** The four alert switches, reached from the more page. */
+  const soundsPage = () => {
+    const items = soundItemsOf(stored.sounds)
 
-  // ------------------------------------------------------------- prompt shelf
+    return quietPage('提示音', (
+      <Box flexDirection="column">
+        {items.map((item, at) => soundRow(item, at))}
+        <Text color={INK.frame}>{ruleOf(columns)}</Text>
+        <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${items.length} 项 · 点行开关 · 试听`}</Text>
+      </Box>
+    ), {
+      onBack: () => actions.navigate({ ...state, path: [], index: 0, isDetail: false }),
+      isScrollable: items.length + 2 > rows,
+    })
+  }
 
-  if (state.tab === 'other' && state.path[0] === 'prompts') {
+  /** The editor choice, read from the plugin's config row; a choice is written back. */
+  const editorPage = () => {
+    const { current, options, error } = data.editor
+    const rowsOf = options.length === 0 ? [current] : options
+
+    return quietPage('编辑器', (
+      <Box flexDirection="column">
+        {noteAt('打开分支 diff 里的文件时使用；也可在 /config 修改。')}
+        {error === undefined ? null : noteAt(error)}
+        {rowsOf.map(option => {
+          const isOn = option === current
+
+          return (
+            <Box key={`editor-${option}`} flexDirection="row">
+              <Button key={`editor-option:${option}`} label={option} plain onPress={() => void actions.chooseEditor(option)}>
+                <Text wrap="truncate-end">
+                  <Text>{' '.repeat(SP.inline)}</Text>
+                  <Text color={isOn ? INK.accent : undefined}>{isOn ? '▸ ' : '  '}</Text>
+                  <Text bold={isOn}>{option}</Text>
+                </Text>
+              </Button>
+            </Box>
+          )
+        })}
+      </Box>
+    ), {
+      onBack: () => actions.navigate({ ...state, path: [], index: 0, isDetail: false }),
+      isScrollable: rowsOf.length + 2 > rows,
+    })
+  }
+
+  /** One MCP call's own page: its arguments and what it answered. */
+  const mcpCallPage = (server: string, callId: string) => {
+    const call = stored.calls.find(one => one.id === callId && one.server === server)
+
+    if (call === undefined) {
+      return quietPage(`${server} · 一次调用`, noteAt('这次调用已经不在了。'), {
+        onBack: () => actions.navigate({ ...state, path: state.path.slice(0, -1), index: 0, isDetail: false }),
+      })
+    }
+
+    const lines = [
+      `时间: ${whenOf(call.at)}`,
+      `结果: ${call.isOk ? '成功' : '失败'}`,
+      `耗时: ${call.ms >= 0 ? `${call.ms}ms` : '—'}`,
+      headLineOf('参数'),
+      ...(call.detail === '' ? ['（无）'] : call.detail.split('\n')),
+      headLineOf('结果'),
+      ...(call.result === '' ? ['（无）'] : call.result.split('\n')),
+    ]
+
+    return quietPage(`${server} · ${call.name}`, (
+      <Box flexDirection="column">
+        {lines.flatMap((line, at) => {
+          if (line.startsWith(SECTION_HEAD)) {
+            return [
+              <Text key={`mcp-call-head-${at}`} color={INK.accent} bold>{`${' '.repeat(SP.inline)}${line.slice(SECTION_HEAD.length)}`}</Text>,
+            ]
+          }
+
+          return sectionLine(line, Text, columns).map((one, k) => <Box key={`mcp-call-${at}-${k}`}>{one}</Box>)
+        })}
+      </Box>
+    ), {
+      tag: call.isOk ? '成功' : '失败',
+      tone: call.isOk ? 'success' : 'error',
+      aside: whenOf(call.at),
+      onBack: () => actions.navigate({ ...state, path: state.path.slice(0, -1), index: 0, isDetail: false }),
+      isScrollable: rowsIn(lines.join('\n'), Math.max(8, columns - SP.inline)) > rows,
+    })
+  }
+
+
+  // ------------------------------------------------------------------ more
+
+  if (state.tab === 'more' && state.path[0] === 'prompts') {
     return promptsPage()
+  }
+
+  if (state.tab === 'more' && state.path[0] === 'sounds') {
+    return soundsPage()
+  }
+
+  if (state.tab === 'more' && state.path[0] === 'editor') {
+    return editorPage()
   }
 
   // --------------------------------------------------------- context breakdown
 
   if (state.tab === 'conversation' && state.path[0] === 'ctx') {
     return breakdownPage()
+  }
+
+  // ------------------------------------------------------------- an MCP call
+
+  if (state.tab === 'conversation' && state.path[0] === 'mcp' && state.path.length === 3) {
+    return mcpCallPage(state.path[1] ?? '', state.path[2] ?? '')
   }
 
   // ---------------------------------------------------------------- file page
@@ -1032,7 +1195,7 @@ export async function drawPane(
                 {countsText(Text, one)}
               </Text>
             </Button>
-            {editorOf(options) === '终端内' ? null : (
+            {data.editor.current === '终端内' ? null : (
               <Button
                 key={`edit-${one.rel}`}
                 label="打开"
@@ -1102,11 +1265,11 @@ export async function drawPane(
               key={`drill-${item.id}`}
               plain
               label={item.line}
-              onPress={() => void actions.navigate({ ...state, index: row, path: [...state.path, item.id] })}
+              onPress={() => void actions.navigate({ ...state, index: row, path: [...state.path, item.pathKey ?? item.id] })}
             >
               <Text wrap="truncate-end">
                 <Text color={INK.accent}>{row === at ? '▸ ' : '  '}</Text>
-                <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${item.line}`}</Text>
+                <Text color={INK.muted}>{`${' '.repeat(SP.inline)}${item.line}${item.hint === undefined ? '' : ` · ${item.hint}`}`}</Text>
               </Text>
             </Button>
           </Box>
@@ -1205,14 +1368,11 @@ export async function drawPane(
   if (state.isDetail && open !== undefined) {
     const heading = open.name ?? open.detailLines[0] ?? '详情'
     const bodyLines = open.detailLines.slice(1)
-    const isMcp = state.tab === 'mcp'
 
     return quietPage(heading, (
       <Box flexDirection="column" flexGrow={1}>
         {bodyLines.map((line, at) => (
-          isMcp
-            ? <Text key={`detail-${at}`} color={line.includes(' 失败 ') ? 'error' : INK.muted}>{`${' '.repeat(SP.inline)}${line}`}</Text>
-            : <Box key={`detail-${at}`}>{fieldLine(line, Text, columns)}</Box>
+          <Box key={`detail-${at}`}>{fieldLine(line, Text, columns)}</Box>
         ))}
       </Box>
     ), {
@@ -1229,41 +1389,37 @@ export async function drawPane(
   const shown = items.slice(0, room)
   const empty = isSpec && state.filter.status !== 'all' && all.length > 0
     ? `没有「${STATUS_TAG[state.filter.status].full}」状态的变更。`
-    : state.tab === 'openspec'
+    : isSpec
       ? specEmptyOf(data.scanState)
       : emptyOf(state.tab)
 
   const body = items.length === 0
     ? noteAt(empty)
-    : state.tab === 'openspec'
+    : isSpec
       ? <Box flexDirection="column">{shown.map((item, at) => listRow(item, at))}</Box>
       : state.tab === 'conversation'
         ? <Box flexDirection="column">{shown.map((item, at) => convRow(item, at))}</Box>
-        : state.tab === 'mcp'
-          ? <Box flexDirection="column">{shown.map((item, at) => mcpRow(item, at))}</Box>
-          : state.tab === 'other'
-            ? <Box flexDirection="column">{shown.map((item, at) => otherRow(item, at))}</Box>
-            : <Box flexDirection="column">{shown.map((item, at) => soundRow(item, at))}</Box>
+        : <Box flexDirection="column">{shown.map((item, at) => moreRow(item, at))}</Box>
 
   const foot = isSpec
     ? `${shown.length}/${items.length} 项 · 点行看详情`
-    : state.tab === 'sounds'
-      ? `${items.length} 项 · 点行开关 · 试听`
-      : state.tab === 'other'
+    : state.tab === 'agent'
+      ? '0 项 · 等待子代理'
+      : state.tab === 'more'
         ? `${items.length} 项 · 点行进入`
         : `${items.length} 项 · 点行看详情`
   const keys = columns < 40
-    ? '1–5'
+    ? '1–4'
     : isSpec
-      ? '1–5 页签 · 点状态筛选'
-      : '1–5 页签'
+      ? '1–4 页签 · 点状态筛选'
+      : '1–4 页签'
 
   const rail = isSpec ? (
     <Box flexDirection="column">
       {statusRail()}
       {secondaryFilter()}
     </Box>
-  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'mcp' ? plainRail(`服务器 ${items.length} 个`) : state.tab === 'other' ? plainRail(`功能 ${items.length} 个`) : plainRail(`开关 ${items.length} 项 · 点行切换 · 试听`)
+  ) : state.tab === 'conversation' ? statsRail() : state.tab === 'agent' ? plainRail('代理 0 个') : plainRail(`功能 ${items.length} 个`)
 
   return listPage(rail, body, foot, keys)
 }
@@ -1576,7 +1732,7 @@ export function specEmptyOf(state: ScanState): string {
 }
 
 export function emptyOf(tab: TabId): string {
-  if (tab === 'openspec') {
+  if (tab === 'spec') {
     return '还没有读到任何 openspec/changes。'
   }
 
@@ -1584,15 +1740,11 @@ export function emptyOf(tab: TabId): string {
     return '本会话还没有对话。你提交输入、或 AI 发起提问后，这里会出现一轮记录。'
   }
 
-  if (tab === 'mcp') {
-    return '本会话还没有调用 MCP 工具。'
+  if (tab === 'agent') {
+    return '本会话还没有子代理。'
   }
 
-  if (tab === 'other') {
-    return '这里还没有功能。'
-  }
-
-  return '提示音开关没有读到；按 4 可重新查看。'
+  return '更多里没有可用的入口。'
 }
 
 /** A clip plays where the store says it may; one that cannot play is one to lose quietly. */

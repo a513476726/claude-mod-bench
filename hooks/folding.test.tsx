@@ -264,7 +264,7 @@ test('the whole-body view is the whole pane: no tabs to wander off by', async ($
   await ui.press({ key: 'full-answer' })
 
   // No tabs to wander off by; the one door out is the shared back.
-  expect(await ui.find({ type: 'Button', key: 'tab-mcp' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'tab-spec' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
 
   await ui.unmount()
