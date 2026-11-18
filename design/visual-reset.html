@@ -1,0 +1,2093 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bench · 视觉重置 / 八个终端方向</title>
+<style>
+  :root {
+    --page: #121110;
+    --page-2: #171614;
+    --ink: #e9e3d9;
+    --ink-2: #a8a197;
+    --ink-3: #8a8278;
+    --line: #2b2926;
+    --line-2: #201e1c;
+    --clay: #d97757;
+
+    /* Claude Code dark terminal, approximated from the engine's theme keys. */
+    --term-bg: #1a1918;
+    --term-title: #252321;
+    --term-fg: #d1cfc5;
+    --dim: #888888;
+    --frame: #5c5954;
+    --green: #4eba65;
+    --red: #ff6b80;
+    --yellow: #ffc107;
+
+    --mono: "Sarasa Mono SC", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Monaco, "Noto Sans Mono CJK SC", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    --serif: "Iowan Old Style", "Palatino Linotype", "Songti SC", "Noto Serif CJK SC", Georgia, serif;
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--page); }
+  body {
+    margin: 0;
+    color: var(--ink);
+    font: 15px/1.7 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--clay); color: var(--page); }
+  button { font: inherit; color: inherit; }
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--clay); outline-offset: 3px; }
+  a { color: var(--ink); text-decoration-color: var(--line); text-underline-offset: 4px; }
+  a:hover { color: var(--clay); }
+
+  .wrap { width: min(1180px, calc(100% - 48px)); margin: 0 auto; }
+
+  /* ---- masthead ---- */
+  .masthead { padding: 72px 0 36px; border-bottom: 1px solid var(--line); }
+  .eyebrow {
+    font: 11px/1.4 var(--mono);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--clay);
+  }
+  h1 {
+    margin: 20px 0 18px;
+    font: 400 clamp(38px, 6vw, 72px)/1.02 var(--serif);
+    letter-spacing: -0.025em;
+    color: #f1eae0;
+    max-width: 14em;
+  }
+  .lede { max-width: 680px; margin: 0; color: var(--ink-2); font-size: 15.5px; }
+  .lede strong { color: var(--ink); font-weight: 500; }
+
+  .intro-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 48px;
+    align-items: start;
+    padding: 40px 0 52px;
+    border-bottom: 1px solid var(--line);
+  }
+  @media (max-width: 860px) { .intro-grid { grid-template-columns: 1fr; gap: 28px; } }
+
+  .intro-copy p { margin: 0 0 14px; color: var(--ink-2); max-width: 640px; }
+  .intro-copy p:last-child { margin-bottom: 0; }
+  .intro-copy b { color: var(--ink); font-weight: 500; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-top: 24px; }
+  .variant-nav { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 22px; font: 11.5px var(--mono); }
+  .variant-nav a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--line); padding-bottom: 2px; }
+  .variant-nav a:hover { color: var(--clay); border-color: var(--clay); }
+  .controls-label { font: 10.5px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
+  .seg { display: inline-flex; border: 1px solid var(--line); }
+  .seg button {
+    min-width: 44px;
+    padding: 6px 11px;
+    border: 0;
+    background: none;
+    color: var(--ink-2);
+    font: 11.5px var(--mono);
+    cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--page); }
+  .seg button:hover { color: var(--ink); }
+  .seg button[aria-pressed="true"]:hover { color: var(--page); }
+
+  .token-card {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .token-card h3 {
+    margin: 0 0 10px;
+    font: 10.5px var(--mono);
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 400;
+  }
+  .tokens { display: grid; gap: 7px; font: 12px var(--mono); }
+  .tokens div { display: flex; justify-content: space-between; gap: 12px; }
+  .tokens span:last-child { color: var(--ink-3); }
+  .swatch { display: inline-block; width: 1.1em; height: 1.1em; margin-right: .55em; vertical-align: -.15em; border: 1px solid var(--line); }
+
+  /* ---- baseline ---- */
+  .baseline { padding: 50px 0 56px; border-bottom: 1px solid var(--line); }
+  .section-label {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+  .section-label .no { font: 11px var(--mono); color: var(--clay); letter-spacing: .1em; }
+  .section-label h2 { margin: 0; font: 400 clamp(26px, 3.2vw, 36px)/1.15 var(--serif); letter-spacing: -0.01em; }
+  .section-label .aside { margin-left: auto; font: 11.5px var(--mono); color: var(--ink-3); }
+  @media (max-width: 700px) { .section-label .aside { display: none; } }
+
+  .baseline-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 40px;
+    align-items: start;
+  }
+  @media (max-width: 980px) { .baseline-grid { grid-template-columns: 1fr; } }
+  .caption { color: var(--ink-2); font-size: 13.5px; line-height: 1.7; }
+  .caption b { color: var(--ink); font-weight: 500; }
+  .caption p { margin: 0 0 12px; }
+  .caption p:last-child { margin-bottom: 0; }
+
+  /* ---- terminal specimen ---- */
+  .term-frame {
+    border: 1px solid var(--line);
+    background: var(--term-bg);
+    overflow: hidden;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 8px 12px;
+    background: var(--term-title);
+    border-bottom: 1px solid var(--line);
+    font: 11px var(--mono);
+    color: var(--dim);
+  }
+  .term-bar .where { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .term-bar .seg { border-color: #3a3733; }
+  .term-bar .seg button { padding: 3px 9px; color: var(--dim); }
+  .term-bar .seg button + button { border-left-color: #3a3733; }
+  .term-bar .seg button[aria-pressed="true"] { background: var(--term-fg); color: var(--term-bg); }
+
+  .term {
+    position: relative;
+    padding: 14px 18px;
+    overflow-x: auto;
+    color: var(--term-fg);
+    font: 13.5px/1.5 var(--mono);
+    font-variant-ligatures: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .term-body { height: calc(24 * 1.5em); overflow: hidden; }
+  .line {
+    display: grid;
+    grid-template-columns: repeat(var(--cols), 1ch);
+    min-height: 1.5em;
+    line-height: 1.5;
+    white-space: pre;
+  }
+  .line + .line { margin-top: 0; }
+  .cell { grid-column: span 1; white-space: pre; }
+  .cell.w2 { grid-column: span 2; }
+  .t-body { color: var(--term-fg); }
+  .t-dim { color: var(--dim); }
+  .t-frame { color: var(--frame); }
+  .t-accent { color: var(--clay); }
+  .t-success { color: var(--green); }
+  .t-warning { color: var(--yellow); }
+  .t-error { color: var(--red); }
+  .t-bold { font-weight: 700; }
+  .line.sel { background: var(--clay); }
+  .line.sel .cell { color: var(--term-bg) !important; }
+  .line.sel .cell.t-bold { font-weight: 700; }
+  .line.band { background: var(--clay); }
+  .line.band .cell { color: var(--term-bg) !important; }
+  .line.band .cell.t-bold { font-weight: 700; }
+  .cell.rail { background: var(--clay); }
+  .cell.rail-frame { background: var(--frame); }
+  .scrollhint {
+    position: absolute;
+    right: 18px;
+    bottom: 10px;
+    padding-left: 16px;
+    background: var(--term-bg);
+    color: var(--dim);
+    font: 11px var(--mono);
+    pointer-events: none;
+  }
+
+  /* ---- variants ---- */
+  .variant { padding: 54px 0 58px; border-bottom: 1px solid var(--line); }
+  .wild-intro { padding: 64px 0 8px; border-top: 1px solid var(--line); }
+  .wild-lede { max-width: 760px; margin: 0 0 8px; color: var(--ink-2); font-size: 15px; }
+  .wild-lede b { color: var(--ink); font-weight: 500; }
+  .variant-head { display: flex; gap: 18px; align-items: flex-start; }
+  .vletter {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--clay);
+    color: var(--clay);
+    font: 13px var(--mono);
+    letter-spacing: .04em;
+    margin-top: 3px;
+  }
+  .variant-title { min-width: 0; }
+  .variant-title .kicker { font: 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+  .variant-title h2 { margin: 6px 0 6px; font: 400 clamp(27px, 3.4vw, 40px)/1.1 var(--serif); letter-spacing: -0.015em; }
+  .variant-title .thesis { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+  .variant-body {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    gap: 42px;
+    align-items: start;
+    margin-top: 30px;
+  }
+  @media (max-width: 980px) { .variant-body { grid-template-columns: 1fr; gap: 26px; } }
+
+  .notes { font-size: 13.5px; line-height: 1.65; color: var(--ink-2); }
+  .notes dl { margin: 0; display: grid; gap: 9px; }
+  .notes .row { display: grid; grid-template-columns: 4.2em minmax(0, 1fr); gap: 10px; }
+  .notes dt { font: 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); padding-top: .24em; }
+  .notes dd { margin: 0; color: var(--ink-2); }
+  .notes dd b { color: var(--ink); font-weight: 500; }
+  .notes h3 {
+    margin: 22px 0 9px;
+    font: 10.5px var(--mono);
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 400;
+  }
+  .notes ul { margin: 0; padding: 0; list-style: none; }
+  .notes li { position: relative; padding-left: 17px; margin-bottom: 6px; }
+  .notes li::before { content: "—"; position: absolute; left: 0; color: var(--clay); }
+  .notes li b { color: var(--ink); font-weight: 500; }
+
+  .specimen { min-width: 0; }
+  .specimen .term-frame { width: max-content; max-width: 100%; }
+  @media (max-width: 700px) { .specimen .term-frame { width: 100%; } }
+
+  /* ---- comparison ---- */
+  .comparison { padding: 56px 0; border-bottom: 1px solid var(--line); }
+  .table-scroll { overflow-x: auto; margin-top: 24px; }
+  table.cmp { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
+  table.cmp th, table.cmp td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+  table.cmp thead th {
+    font: 10.5px var(--mono);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 400;
+    border-bottom-color: var(--line);
+  }
+  table.cmp td:first-child { font: 12px var(--mono); color: var(--ink-2); white-space: nowrap; }
+  table.cmp td strong { color: var(--ink); font-weight: 500; }
+  table.cmp tr.reco td { background: rgba(217,119,87,.07); }
+  table.cmp tr.reco td:first-child { color: var(--clay); }
+  .cmp-sub { margin: 38px 0 10px; font: 10.5px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); font-weight: 400; }
+
+  /* ---- close ---- */
+  .close { padding: 56px 0 80px; }
+  .reco {
+    border-left: 2px solid var(--clay);
+    padding: 2px 0 2px 24px;
+    max-width: 820px;
+  }
+  .reco .big { font: 400 clamp(22px, 3vw, 30px)/1.35 var(--serif); color: #f0e9df; margin: 0 0 14px; }
+  .reco p { margin: 0 0 12px; color: var(--ink-2); }
+  .reco p:last-child { margin-bottom: 0; }
+  .next {
+    margin-top: 42px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .next > div { background: var(--page); padding: 20px 20px 22px; }
+  .next h3 { margin: 0 0 8px; font: 10.5px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--clay); font-weight: 400; }
+  .next p { margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.65; }
+  @media (max-width: 760px) { .next { grid-template-columns: 1fr; } }
+
+  footer { padding: 26px 0 48px; color: var(--ink-3); font: 11px var(--mono); }
+  footer .wrap { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+
+  .sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">bench · terminal workbench · visual reset</div>
+    <h1>换一种方式<br>看工作台。</h1>
+    <p class="lede">
+      八个暗色终端方向：前四个收敛，后四个激进。不是网页皮肤：内容按字符格排版，颜色与字重只落到
+      <strong>Claude Code 主题令牌</strong>。HTML 只负责本地预览，真正的边界仍是终端。
+    </p>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="intro-grid" aria-label="阅读说明">
+    <div class="intro-copy">
+      <p>
+        当前面板把每页放进两张大卡：页签、主卡、分支卡。24 行高的面板里，边界与空行先吃掉一半，
+        列表只剩 7 行；五行五色又把这 7 行染成五种注意力。
+      </p>
+      <p>
+        下面的 <b>前四个方向</b>各自回答一个问题：<b>能不能不放框？</b>（A）<b>能不能像数据表？</b>（B）
+        <b>能不能只留一条脊？</b>（C）<b>能不能让状态自己成列？</b>（D）。
+        页末的 <b>第二组</b>反过来：状态带（E）、ASCII 海报框（F）、常驻双栏（G）、头条式层级（H）。
+      </p>
+      <p>
+        每版都给<b>列表页</b>与<b>详情页</b>。宽度可在 80 / 64 / 40 列之间切换，用来检查窄屏；
+        高度固定为 24 行，这是面板最紧的高度预算。
+      </p>
+      <div class="controls">
+        <span class="controls-label">终端宽度</span>
+        <div class="seg" role="group" aria-label="终端宽度">
+          <button data-width="80" aria-pressed="true">80 列</button>
+          <button data-width="64" aria-pressed="false">64 列</button>
+          <button data-width="40" aria-pressed="false">40 列</button>
+        </div>
+        <span class="controls-label">预览高度 24 行</span>
+      </div>
+      <nav class="variant-nav" aria-label="八个方向">
+        <a href="#baseline">00 现状</a>
+        <a href="#a">A 页边</a>
+        <a href="#b">B 栅格</a>
+        <a href="#c">C 书脊</a>
+        <a href="#d">D 标签</a>
+        <a href="#wild">第二组</a>
+        <a href="#e">E 仪表盘</a>
+        <a href="#f">F 大字报</a>
+        <a href="#g">G 双栏</a>
+        <a href="#h">H 头条</a>
+        <a href="#cmp">放在一起看</a>
+      </nav>
+    </div>
+    <aside class="token-card" aria-label="主题令牌">
+      <h3>主题令牌 / 预览近似值</h3>
+      <div class="tokens">
+        <div><span><i class="swatch" style="background:#d1cfc5"></i>body</span><span>text</span></div>
+        <div><span><i class="swatch" style="background:#888888"></i>muted</span><span>subtle</span></div>
+        <div><span><i class="swatch" style="background:#5c5954"></i>frame</span><span>inactive</span></div>
+        <div><span><i class="swatch" style="background:#d97757"></i>accent</span><span>claude</span></div>
+        <div><span><i class="swatch" style="background:#ff6b80"></i>error</span><span>error</span></div>
+        <div><span><i class="swatch" style="background:#ffc107"></i>warning</span><span>warning</span></div>
+        <div><span><i class="swatch" style="background:#4eba65"></i>success</span><span>success</span></div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ================= baseline ================= -->
+  <section class="baseline" id="baseline" aria-labelledby="baseline-title">
+    <div class="section-label">
+      <span class="no">00</span>
+      <h2 id="baseline-title">现状 / 对照</h2>
+      <span class="aside">不是提案 · 只用来量差距</span>
+    </div>
+    <div class="baseline-grid">
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · 现状</span>
+            <div class="seg" role="group" aria-label="现状预览">
+              <button data-style="baseline" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="baseline" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="baseline"></div>
+            <div class="scrollhint" data-hint="baseline" hidden></div>
+          </div>
+        </div>
+      </div>
+      <div class="caption">
+        <p><b>两张大卡 + 分支卡。</b>页签 1 行、空行 2 行、卡片边 4 行、分支卡 5 行；24 行里只有 7 行留给列表。</p>
+        <p><b>五行五色。</b>每行整行取分区色，扫读前先被颜色分走注意力；干净工作区的分支卡却仍占着固定空间。</p>
+        <p><b>框线是唯一的结构。</b>去掉框之后，面板还剩什么？这是所有方向共同要回答的。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= A · margin ================= -->
+  <section class="variant" id="a" aria-labelledby="a-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">A</div>
+      <div class="variant-title">
+        <div class="kicker">方向 A · 无框 / 账本</div>
+        <h2 id="a-title">页边 <span style="color:var(--ink-3);font-size:.55em">Margin</span></h2>
+        <p class="thesis">把面板当账本：没有框，只有页边和横线。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>无卡片、无分支卡。分组标题直接落在版面上，组间不空行。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>14 条</b>，是现状的两倍。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>只有分组标记与选中行走色；正文与元数据回到灰阶。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>左侧 2 格页边</b>：光标、分组标记、折叠箭头都在这一列。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>大面积留白与灰阶，颜色只做「分组」与「当前」两件事。</li>
+          <li>没有背景块，暗色主题下不出现刺眼的实心矩形。</li>
+          <li>行距与横线承担层级，长时间扫读不累。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>分组多时靠标题与缩进，不靠框；需要严格的行距。</li>
+          <li>分支从常驻卡改为<b>页脚摘要 + 下钻</b>，要新交互。</li>
+          <li>UI-SPEC 目前只允许「卡片」一种区域形状；需新增无框布局章节。</li>
+          <li>列表行不再整行取分区色；需改 §4.3 的颜色规则。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · A 页边</span>
+            <div class="seg" role="group" aria-label="页边预览">
+              <button data-style="margin" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="margin" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="margin"></div>
+            <div class="scrollhint" data-hint="margin" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= B · grid ================= -->
+  <section class="variant" id="b" aria-labelledby="b-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">B</div>
+      <div class="variant-title">
+        <div class="kicker">方向 B · 分组表格 / 键盘流</div>
+        <h2 id="b-title">栅格 <span style="color:var(--ink-3);font-size:.55em">Grid</span></h2>
+        <p class="thesis">把面板当数据表：一屏看到最多行，选中就是一根实心条。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>顶部状态条 + 列头 + 行。分组是内嵌分隔行，分支压成页脚一行。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>14 条</b>，且保留分组分隔。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>选中行整行反色；其余只用分组色与状态符号。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>反色选中条</b>（accent 背景 + inverse 文字），像 k9s。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>一屏只有一个高亮块，视线有确定落点。</li>
+          <li>列头与分隔线给数据边界，不依赖卡片边框。</li>
+          <li>键位提示常驻，键盘操作不需要记。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>反色条在部分主题下可能过亮；必须验证暗/亮主题对比度。</li>
+          <li>背景色目前只用于页签讨论；需新增「选中行背景」边界。</li>
+          <li>键位提示必须与实际键位一致（1–4 / z / b），不发明新键。</li>
+          <li>分支下钻是新页面；需补返回与滚动预算。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · B 栅格</span>
+            <div class="seg" role="group" aria-label="栅格预览">
+              <button data-style="grid" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="grid" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="grid"></div>
+            <div class="scrollhint" data-hint="grid" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= C · spine ================= -->
+  <section class="variant" id="c" aria-labelledby="c-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">C</div>
+      <div class="variant-title">
+        <div class="kicker">方向 C · 精修卡片 / 章节</div>
+        <h2 id="c-title">书脊 <span style="color:var(--ink-3);font-size:.55em">Spine</span></h2>
+        <p class="thesis">保留卡片，但让它像一本书的书脊：一条左脊、上横线、下横线。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>区域名在卡外，像章节标题；一条 1 格左脊贯穿内容；上下横线收口。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>14 条</b>；分支在 24 行时压成页脚。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>脊线灰阶；选中与分组标记带色；没有背景块。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>左脊 + 章节标题</b>：区域仍然有边界，但不再是一个盒子。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>灰阶脊线比整圈边框轻，暗色下不抢正文。</li>
+          <li>章节名在卡外，标题与内容各自有呼吸。</li>
+          <li>保留「一页一张卡」的心智，改动最小。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>左脊是逐行竖线，<b>必须由固定宽度容器绘制</b>：内容宽 = 面板宽 − 2，否则 Button / 多 Text 行会错位。</li>
+          <li><code>▌</code> 需 EAW 验证；不稳时回退 <code>|</code>。</li>
+          <li>卡片标题从边线移到卡外，需补「章节标题」构件与高度预算。</li>
+          <li>24 行时分支卡不可见，需要「压成页脚」的降级规则。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · C 书脊</span>
+            <div class="seg" role="group" aria-label="书脊预览">
+              <button data-style="spine" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="spine" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="spine"></div>
+            <div class="scrollhint" data-hint="spine" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= D · tagged ================= -->
+  <section class="variant" id="d" aria-labelledby="d-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">D</div>
+      <div class="variant-title">
+        <div class="kicker">方向 D · 状态优先 / 平铺</div>
+        <h2 id="d-title">标签 <span style="color:var(--ink-3);font-size:.55em">Tagged</span></h2>
+        <p class="thesis">把状态变成第一列，取消分组标题：一行一个状态词，列表更短。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>顶部一行状态筛选轨道；列表按状态排序，每行第一列是 2 字标签。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>14 条</b>，还留 3 行呼吸。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>只有状态词带色；其余全部灰阶。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>状态词列 + 筛选轨道</b>：分组不再占行，筛选行兼作分组。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>颜色集中在一列 8 个词上，暗色下最安静。</li>
+          <li>没有表头、没有卡片边，24 行几乎全给内容。</li>
+          <li>状态是显式词语，不用先学 <code>* o ! + .</code>。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>失去分组折叠；<code>z</code> 需要改为「筛选全部」或移除。</li>
+          <li>筛选轨道需要点击目标与当前态；窄屏要压缩。</li>
+          <li>40 列下状态词缩为 1 字（进/待/异/完/无）。</li>
+          <li>需新增「状态标签列」与「筛选轨道」两节规范。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · D 标签</span>
+            <div class="seg" role="group" aria-label="标签预览">
+              <button data-style="tagged" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="tagged" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="tagged"></div>
+            <div class="scrollhint" data-hint="tagged" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= wild four ================= -->
+  <section class="wild-intro" id="wild" aria-labelledby="wild-title">
+    <div class="section-label">
+      <span class="no">第二组</span>
+      <h2 id="wild-title">四个激进方向</h2>
+      <span class="aside">高对比 · 结构性改变</span>
+    </div>
+    <p class="wild-lede">
+      第一组在收敛：去掉框、改分组、加状态列。第二组反过来，用更强的形状改变工作方式——
+      实心状态带、ASCII 海报框、常驻双栏、头条式层级。它们都仍然只用字符格、主题色与字重。
+    </p>
+  </section>
+
+  <!-- ================= E · hud ================= -->
+  <section class="variant" id="e" aria-labelledby="e-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">E</div>
+      <div class="variant-title">
+        <div class="kicker">方向 E · 控制台 / 状态带</div>
+        <h2 id="e-title">仪表盘 <span style="color:var(--ink-3);font-size:.55em">HUD</span></h2>
+        <p class="thesis">把面板当任务控制台：状态先于列表。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>两行反色状态带 + 分段状态条 + 密列表 + 底部 ticker。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>14 条</b>；状态带只占 2 行。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>唯一一块实心 accent；其余靠状态条与 meter 的分组色。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>常驻仪表带 + ticker</b>：一屏像在值班。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>实心带只占两行，是视觉锚点，不铺满整屏。</li>
+          <li>列表仍以灰阶为主，meter 只是细色块。</li>
+          <li>ticker 把分支与最新时间压到一行，省掉分支卡。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>背景带在亮色主题下要反转（<code>backgroundColor</code> + <code>inverseText</code>）。</li>
+          <li>ticker 不能动；只做静态截断，不能假装滚动。</li>
+          <li>meter 用 ASCII <code>#</code> / <code>-</code>，不引入块字符。</li>
+          <li>需新增「状态带 / meter / ticker」三节规范与高度预算。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · E 仪表盘</span>
+            <div class="seg" role="group" aria-label="仪表盘预览">
+              <button data-style="hud" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="hud" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="hud"></div>
+            <div class="scrollhint" data-hint="hud" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= F · poster ================= -->
+  <section class="variant" id="f" aria-labelledby="f-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">F</div>
+      <div class="variant-title">
+        <div class="kicker">方向 F · ASCII 海报 / 高对比</div>
+        <h2 id="f-title">大字报 <span style="color:var(--ink-3);font-size:.55em">Poster</span></h2>
+        <p class="thesis">把面板当一张海报：框、状态码、粗 meter。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>全宽 <code>#</code> 框；顶部图例；一个展开项；其余为紧凑索引。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>1 个展开项 + 12 条索引</b>。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>状态码与 meter 用分组色；<code>#</code> 框保持结构灰阶。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>ASCII 框 + 状态码</b>（D3 / R2 / B1 / A7 / N1）。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>没有背景块，对比来自字符本身，暗色下非常清楚。</li>
+          <li>状态码把五个分区压成两个字符，扫读快。</li>
+          <li>展开项给一条变更足够的存在感，不再是一行里的一格。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>逐行 <code>#</code> 竖边必须由固定宽度容器绘制（内容宽 = 面板宽 − 4），否则会错位。</li>
+          <li>40 列下索引名称被截断；详情标题折行，需要单独的窄屏规则。</li>
+          <li>状态码是新的视觉语言，需要图例与可访问名。</li>
+          <li>展开项的高度预算固定，索引行数要随高度重算。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · F 大字报</span>
+            <div class="seg" role="group" aria-label="大字报预览">
+              <button data-style="poster" data-view="list" aria-pressed="true">列表</button>
+              <button data-style="poster" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="poster"></div>
+            <div class="scrollhint" data-hint="poster" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= G · split ================= -->
+  <section class="variant" id="g" aria-labelledby="g-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">G</div>
+      <div class="variant-title">
+        <div class="kicker">方向 G · 主从 / 常驻检查器</div>
+        <h2 id="g-title">双栏 <span style="color:var(--ink-3);font-size:.55em">Split</span></h2>
+        <p class="thesis">把列表和详情放在同一屏：选中即预览。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>左 28 格常驻检查器 + 1 格分隔 + 右列表；选中行即时更新左侧，不跳页。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下右栏 <b>14 条</b>，左栏常驻详情。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>左栏 <code>▌</code> accent + 标题 accent；分隔 <code>│</code> 灰阶。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>主从双栏</b>：详情不再是独立页，而是常驻的检查器。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>把「列表 → 详情 → 返回」三次跳转压成一次点击。</li>
+          <li>左栏是持续上下文，右栏保持扫读节奏。</li>
+          <li>没有背景块；分隔线是唯一的新结构。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>左栏与分隔必须固定宽度；<code>&lt;56</code> 列退化为单栏。</li>
+          <li>长标题、长路径在左栏要折行；左栏高度预算固定。</li>
+          <li>返回层级变化：<code>b</code> 从详情回到列表，而不是关闭一个页面。</li>
+          <li>需新增「双栏布局 / 常驻检查器 / 窄屏退化」三节规范。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · G 双栏</span>
+            <div class="seg" role="group" aria-label="双栏预览">
+              <button data-style="split" data-view="list" aria-pressed="true">双栏</button>
+              <button data-style="split" data-view="detail" aria-pressed="false">全屏详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="split"></div>
+            <div class="scrollhint" data-hint="split" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= H · hero ================= -->
+  <section class="variant" id="h" aria-labelledby="h-title">
+    <div class="variant-head">
+      <div class="vletter" aria-hidden="true">H</div>
+      <div class="variant-title">
+        <div class="kicker">方向 H · 编辑式 / 一个头条</div>
+        <h2 id="h-title">头条 <span style="color:var(--ink-3);font-size:.55em">Hero</span></h2>
+        <p class="thesis">把面板当报纸头版：一件变更占头条，其余进索引。</p>
+      </div>
+    </div>
+    <div class="variant-body">
+      <aside class="notes">
+        <dl>
+          <div class="row"><dt>结构</dt><dd>报头 + 头条（标题 / 元信息 / meter）+ 索引；头条固定占 6 行。</dd></div>
+          <div class="row"><dt>密度</dt><dd>80×24 下 <b>1 个头条 + 12 条索引</b>。</dd></div>
+          <div class="row"><dt>颜色</dt><dd>头条用 accent 标题与 meter；索引只有状态符号色。</dd></div>
+          <div class="row"><dt>签名</dt><dd><b>一屏一个头条 + 索引</b>：信息有明确的主次。</dd></div>
+        </dl>
+        <h3>为什么适合暗色</h3>
+        <ul>
+          <li>头条用字号与留白建立层级，不靠背景块。</li>
+          <li>索引保持灰阶，只有状态符号分散着色。</li>
+          <li>头版结构让「最新 / 最重要」一眼可见。</li>
+        </ul>
+        <h3>代价 / 规范缺口</h3>
+        <ul>
+          <li>头条固定占高，索引被压到 12–13 条；高度预算要单独算。</li>
+          <li>40 列下头条标题折行，索引必须丢列。</li>
+          <li>头条与索引的选中关系要明确：点索引换头条。</li>
+          <li>需新增「头条 / 索引」两级层级与高度规则。</li>
+        </ul>
+      </aside>
+      <div class="specimen">
+        <div class="term-frame">
+          <div class="term-bar">
+            <span class="where">bench · dock · <span data-cols>80</span> 列 · H 头条</span>
+            <div class="seg" role="group" aria-label="头条预览">
+              <button data-style="hero" data-view="list" aria-pressed="true">头条</button>
+              <button data-style="hero" data-view="detail" aria-pressed="false">详情</button>
+            </div>
+          </div>
+          <div class="term" style="--cols:80">
+            <div class="term-body" data-render="hero"></div>
+            <div class="scrollhint" data-hint="hero" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= comparison ================= -->
+  <section class="comparison" id="cmp" aria-labelledby="cmp-title">
+    <div class="section-label">
+      <span class="no">05</span>
+      <h2 id="cmp-title">放在一起看</h2>
+      <span class="aside">80 列 × 24 行</span>
+    </div>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>A 页边</th>
+            <th>B 栅格</th>
+            <th>C 书脊</th>
+            <th>D 标签</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>结构</td><td>无框 · 页边</td><td>分组表格</td><td>单脊 + 章节</td><td>平铺列表</td></tr>
+          <tr><td>24 行可见</td><td>14 条</td><td>14 条</td><td>14 条</td><td><strong>14 条 + 3 行空</strong></td></tr>
+          <tr><td>分组方式</td><td>彩色标题</td><td>内嵌分隔行</td><td>彩色标题</td><td>状态列 + 筛选</td></tr>
+          <tr><td>颜色落点</td><td>标题 / 选中</td><td>选中条 / 标题</td><td>脊 / 标题 / 选中</td><td>状态词</td></tr>
+          <tr><td>背景块</td><td>无</td><td><strong>选中行</strong></td><td>无</td><td>无</td></tr>
+          <tr><td>分支</td><td>页脚摘要</td><td>页脚摘要</td><td>页脚 / 卡</td><td>一行摘要</td></tr>
+          <tr><td>详情页</td><td>标题 + 横线</td><td>表格式</td><td>章节 + 脊</td><td>字段流 + 标签</td></tr>
+          <tr><td>40 列</td><td>好</td><td>好</td><td>中</td><td>好</td></tr>
+          <tr><td>实现风险</td><td>低</td><td>中（背景 / 键位）</td><td>中（左脊宽度）</td><td>低</td></tr>
+          <tr class="reco"><td>适合</td><td>安静扫读，保留分组</td><td>高密度键盘流</td><td>最小改动，保留卡片</td><td><strong>状态优先的工作台</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="cmp-sub">第二组 / 激进四版</h3>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>E 仪表盘</th>
+            <th>F 大字报</th>
+            <th>G 双栏</th>
+            <th>H 头条</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>结构</td><td>状态带 + 仪表</td><td><code>#</code> 框 + 索引</td><td>主从双栏</td><td>头条 + 索引</td></tr>
+          <tr><td>24 行可见</td><td>14 条</td><td>1 展开 + 12 索引</td><td><strong>14 条 + 常驻详情</strong></td><td>1 头条 + 12 索引</td></tr>
+          <tr><td>颜色</td><td><strong>实心状态带</strong></td><td>状态码 + meter</td><td>左栏 accent</td><td>头条 accent</td></tr>
+          <tr><td>背景块</td><td><strong>状态带</strong></td><td>无</td><td>无</td><td>无</td></tr>
+          <tr><td>交互</td><td>点行看详情</td><td>点行展开</td><td><strong>选中即预览</strong></td><td>点索引换头条</td></tr>
+          <tr><td>40 列</td><td>中</td><td>中</td><td>退化为单栏</td><td>中</td></tr>
+          <tr><td>实现风险</td><td>高（背景带 / ticker）</td><td>中（<code>#</code> 框宽度）</td><td>高（双栏宽度 / 交互）</td><td>中（高度预算）</td></tr>
+          <tr class="reco"><td>适合</td><td>值班仪表盘</td><td>强识别度</td><td><strong>深工作流</strong></td><td>编辑式阅读</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= close ================= -->
+  <section class="close">
+    <div class="reco">
+      <p class="big">先选语言，再谈实现。<br>安静的重置选 D；结构性的改变选 G。</p>
+      <p>
+        D 把卡片边框与分组标题换成一行状态筛选，24 行多出 3 行呼吸，颜色只剩 8 个状态词。
+        它仍然是「列表 + 详情」，改动最小、风险最低；如果分组与折叠是刚需，选 A。
+      </p>
+      <p>
+        第二组里，<strong>G 双栏</strong>是最值得做的结构性改变：选中即预览，把「列表 → 详情 → 返回」
+        压成一次点击。<strong>E</strong> 是最强的视觉身份，但两行实心状态带与 ticker 要占固定高度，
+        亮色主题还要反转；<strong>F</strong> 最像海报，适合做详情页或需要强识别度的场景；
+        <strong>H</strong> 是头条 + 索引，介于 D 与 F 之间，适合编辑式阅读。
+      </p>
+      <p>
+        组合也成立：例如「D 的列表 + F 的详情」「G 的双栏 + E 的状态带」「H 的头条 + D 的索引」。
+      </p>
+    </div>
+
+    <div class="next">
+      <div>
+        <h3>选定之后</h3>
+        <p>先补 <code>docs/UI-SPEC.md</code> 与 <code>bench-ui</code> 的规范缺口，再开 OpenSpec 变更；不要直接改 <code>hooks/panes.tsx</code>。</p>
+      </div>
+      <div>
+        <h3>先做一片</h3>
+        <p>用 OpenSpec 页签做垂直切片：列表、详情、分支摘要、返回与滚动，先验证 80 / 64 / 40 列与暗/亮主题。</p>
+      </div>
+      <div>
+        <h3>怎么回复</h3>
+        <p>回 <code>A</code>–<code>H</code>，或组合，例如「D 的列表 + F 的详情」「G，但左栏换成 E 的状态带」。</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>bench · visual reset · 2026-11-17</span>
+    <span>预览颜色为 Claude Code 暗色主题的近似值；实际颜色由用户主题决定。</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const ROWS = 24;
+  const state = {
+    cols: 80,
+    views: {
+      baseline: "list", margin: "list", grid: "list", spine: "list", tagged: "list",
+      hud: "list", poster: "list", split: "list", hero: "list",
+    },
+  };
+
+  // Preview-only switches, so a page can be opened straight into a width or a
+  // detail view: ?cols=64&margin=detail&grid=detail
+  const params = new URLSearchParams(location.search);
+  if (params.get("cols")) state.cols = Number(params.get("cols")) || 80;
+  for (const key of Object.keys(state.views)) {
+    if (params.get(key) === "detail") state.views[key] = "detail";
+  }
+
+  /* ---------------------------------------------------------------- widths */
+
+  const SELECTOR = /[︎️]/u;
+  const NARROW = new Set([...(
+    "▸▾◉●○★⚠▶▼■◆·•─│┌┐└┘├┤┬┴┼╭╮╰╯▏▌▀▄█↑↓←→…"
+  )]);
+  const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦\u{1F300}-\u{1F5FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2B00}-\u{2BFF}\u{231A}-\u{231B}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}]/u;
+
+  function cw(ch) {
+    if (SELECTOR.test(ch)) return 0;
+    if (NARROW.has(ch)) return 1;
+    return WIDE.test(ch) ? 2 : 1;
+  }
+  function tw(text) {
+    let n = 0;
+    for (const ch of text) n += cw(ch);
+    return n;
+  }
+  function pad(text, width) {
+    return text + " ".repeat(Math.max(0, width - tw(text)));
+  }
+  function rpad(text, width) {
+    return " ".repeat(Math.max(0, width - tw(text))) + text;
+  }
+  function fit(text, width) {
+    if (tw(text) <= width) return text;
+    let out = "";
+    let used = 0;
+    for (const ch of text) {
+      const w = cw(ch);
+      if (used + w > Math.max(1, width - 1)) break;
+      out += ch;
+      used += w;
+    }
+    return out + "…";
+  }
+  const col = (text, width) => pad(fit(text, width), width);
+  const rcol = (text, width) => rpad(fit(text, width), width);
+
+  function wrapCells(text, width) {
+    const room = Math.max(1, width);
+    const out = [];
+    const words = [];
+    for (const word of String(text).split(" ")) {
+      let rest = word;
+      while (tw(rest) > room) {
+        let kept = "";
+        for (const ch of rest) {
+          if (tw(kept + ch) > room) break;
+          kept += ch;
+        }
+        if (kept === "") kept = [...rest][0] || "";
+        words.push(kept);
+        rest = rest.slice(kept.length);
+      }
+      words.push(rest);
+    }
+    let row = "";
+    for (const word of words) {
+      if (row === "") row = word;
+      else if (tw(row + " " + word) <= room) row += " " + word;
+      else {
+        out.push(row);
+        row = word;
+      }
+    }
+    if (row !== "" || out.length === 0) out.push(row);
+    return out;
+  }
+
+  function wrapName(text, width) {
+    const room = Math.max(1, width);
+    if (tw(text) <= room) return [text];
+    const chunks = String(text).split(/(?<=-)/);
+    if (chunks.length === 1) return wrapCells(text, room);
+    const out = [];
+    let row = "";
+    for (const chunk of chunks) {
+      if (row === "") row = chunk;
+      else if (tw(row + chunk) <= room) row += chunk;
+      else {
+        out.push(row);
+        row = chunk;
+      }
+    }
+    if (row !== "") out.push(row);
+    return out.flatMap((r) => (tw(r) <= room ? [r] : wrapCells(r, room)));
+  }
+
+  /* ----------------------------------------------------------------- runs */
+
+  const run = (t, c = "") => ({ t, c });
+  const line = (...runs) => runs.flat().filter(Boolean);
+
+  function spread(leftRuns, rightText, width, rightClass = "t-dim") {
+    const left = leftRuns.reduce((n, r) => n + tw(r.t), 0);
+    const right = tw(rightText);
+    const gap = width - left - right;
+    if (gap < 2) return leftRuns;
+    return [...leftRuns, run(" ".repeat(gap), ""), run(rightText, rightClass)];
+  }
+
+  /**
+   * A detail's title with its way back. Wide enough: one line, back at the right.
+   * Narrow: the back keeps the first line, and the title wraps under it — a title
+   * is content and is never cut to make room for chrome.
+   */
+  function titleWithBack(text, width, cls = "t-accent t-bold") {
+    const back = "← 返回";
+    const full = "  " + text;
+    if (tw(full) + tw(back) + 2 <= width) {
+      return [line(...spread([run(full, cls)], back, width))];
+    }
+    return [
+      line(...spread([run("  ", "")], back, width)),
+      ...wrapName(text, Math.max(8, width - 4)).map((r) => line(run("  " + r, cls))),
+    ];
+  }
+
+  function renderLine(runs, opts = {}) {
+    const cells = [];
+    let used = 0;
+    for (const r of runs) {
+      for (const ch of r.t) {
+        const w = cw(ch);
+        if (w === 0) {
+          if (cells.length) cells[cells.length - 1].t += ch;
+          continue;
+        }
+        if (used + w > state.cols) break;
+        cells.push({ t: ch, c: r.c || "", w });
+        used += w;
+      }
+      if (used >= state.cols) break;
+    }
+    const el = document.createElement("div");
+    el.className = "line" + (opts.cls ? " " + opts.cls : "");
+    if (cells.length === 0) {
+      const s = document.createElement("span");
+      s.className = "cell";
+      s.textContent = " ";
+      el.appendChild(s);
+      return el;
+    }
+    for (const c of cells) {
+      const s = document.createElement("span");
+      s.className = "cell" + (c.c ? " " + c.c : "") + (c.w === 2 ? " w2" : "");
+      s.textContent = c.t;
+      el.appendChild(s);
+    }
+    return el;
+  }
+
+  /* ----------------------------------------------------------------- data */
+
+  const GROUPS = [
+    { key: "doing", label: "进行中", tag: "进行", short: "进", mark: "*", tone: "t-accent", count: 3 },
+    { key: "ready", label: "待归档", tag: "待办", short: "待", mark: "o", tone: "t-warning", count: 2 },
+    { key: "broken", label: "归档异常", tag: "异常", short: "异", mark: "!", tone: "t-error", count: 1 },
+    { key: "archived", label: "已归档", tag: "完成", short: "完", mark: "+", tone: "t-success", count: 7 },
+    { key: "bare", label: "无任务清单", tag: "无单", short: "无", mark: ".", tone: "t-dim", count: 1 },
+  ];
+  const groupOf = (key) => GROUPS.find((g) => g.key === key);
+
+  const ITEMS = [
+    { g: "doing", done: "38/40", age: "00d", repo: "bench", name: "detail-page-scroll-and-full-text", newest: true },
+    { g: "doing", done: "13/16", age: "6d", repo: "old_sales", name: "fix-signmanager-full-down-payment" },
+    { g: "doing", done: "2/5", age: "1d", repo: "sales-platform", name: "add-conversation-export" },
+    { g: "ready", done: "9/10", age: "2d", repo: "bench", name: "add-mcp-call-drilldown" },
+    { g: "ready", done: "4/4", age: "3d", repo: "bench", name: "panel-density-pass" },
+    { g: "broken", done: "2/7", age: "8d", repo: "bench", name: "fix-openspec-scan-and-filters" },
+    { g: "archived", done: "12/12", age: "8d", repo: "bench", name: "panel-layout-system" },
+    { g: "archived", done: "7/7", age: "13d", repo: "bench", name: "rebuild-decisions-as-conversation" },
+    { g: "archived", done: "5/5", age: "13d", repo: "bench", name: "add-conversation-stats" },
+    { g: "archived", done: "4/4", age: "14d", repo: "bench", name: "fix-branch-discovery" },
+    { g: "archived", done: "6/6", age: "14d", repo: "bench", name: "add-pet-companion" },
+    { g: "archived", done: "4/4", age: "13d", repo: "bench", name: "fix-diff-view-and-sounds" },
+    { g: "archived", done: "3/3", age: "12d", repo: "bench", name: "add-sound-alerts" },
+    { g: "bare", done: "—", age: "5d", repo: "bench", name: "notes-on-conversation-export" },
+  ];
+
+  const BRANCHES = [
+    { own: true, name: "根目录", branch: "main", dirty: "+3" },
+    { own: false, name: "old_sales", branch: "develop_20_20261021084" },
+    { own: false, name: "sales-platform", branch: "develop_20_20261012001", dirty: "+1" },
+  ];
+
+  const DETAIL = {
+    title: "detail-page-scroll-and-full-text",
+    fields: [
+      ["仓库", "bench"],
+      ["状态", "进行中"],
+      ["任务", "38/40"],
+      ["需求号", "—"],
+      ["开发", "zhongzhiguo"],
+      ["文件", "proposal.md · design.md · tasks.md · specs/panel-layout/spec.md"],
+      ["修改", "11-17 15:44（今天）"],
+    ],
+    open: [
+      "9.1 真实终端（小高度、80 / 40 / 24 列、暗/亮主题）逐页滚到底，点击返回并验证 b：OpenSpec 详情、对话详情、全文页、下钻列表、调用详情、MCP 详情、diff 列表、diff 详情、文件预览。",
+      "9.2 若 9.1 发现浮层不可点或压字不可读，按 design.md Decision 1 升级为「接管 ui.scroll + 固定返回行」。",
+    ],
+  };
+
+  const itemsOf = (key) => ITEMS.filter((it) => it.g === key);
+
+  /* ------------------------------------------------------------ primitives */
+
+  function topEdge(title, aside, icon, width) {
+    const left = `╭─  ${icon ? icon + " " : ""}${title} `;
+    const right = aside ? `─ · ${aside} ╮` : "─╮";
+    const fill = width - tw(left) - tw(right);
+    if (fill >= 1) return left + "─".repeat(fill) + right;
+    const right2 = "─╮";
+    const fill2 = width - tw(left) - tw(right2);
+    if (fill2 >= 1) return left + "─".repeat(fill2) + right2;
+    return pad(fit(`╭─ ${title} `, width - 2), width - 2) + right2;
+  }
+  const bottomEdge = (width) => "╰" + "─".repeat(Math.max(0, width - 2)) + "╯";
+
+  function baselineTabs(width) {
+    const rest = width >= 56 ? "  [ 对话 ]  [ MCP ]  [ 提示音 ]" : "  [对话]  [MCP]  [音]";
+    return line(
+      run(" ", ""),
+      run("◉ ", "t-accent"),
+      run("[📋 OpenSpec]", "t-accent t-bold"),
+      run(rest, "t-dim"),
+    );
+  }
+
+  /* ---------------------------------------------------------------- baseline */
+
+  function baselineRows(width) {
+    const inner = width - 4;
+    const repoW = width >= 72 ? 14 : 0;
+    const ageW = width >= 56 ? 5 : 0;
+    const fixed = 1 + 1 + 6 + (ageW ? ageW + 2 : 0) + (repoW ? repoW + 2 : 0) + 2;
+    const nameW = Math.max(6, inner - fixed);
+    const out = [];
+    for (const it of ITEMS.slice(0, 7)) {
+      const group = groupOf(it.g);
+      const mark = it.newest ? "*" : group.mark;
+      const row =
+        col(it.newest ? "▸" : "", 1) + "  " +
+        col(mark, 1) + "  " +
+        col(it.done, 6) +
+        (ageW ? "  " + col(it.age, ageW) : "") +
+        (repoW ? "  " + col(it.repo, repoW) : "") +
+        "  " + col(it.name, nameW);
+      out.push(line(run("  ", ""), run(pad(row, inner), group.tone), run("  ", "")));
+    }
+    return out;
+  }
+
+  function baselineGroupBar(width) {
+    const runs = [run("  ", "")];
+    let used = 2;
+    GROUPS.forEach((g, i) => {
+      const text = `${i === 0 ? "▾" : "▸"} ${g.mark} ${g.label} ${g.count}`;
+      const w = tw(text) + 3;
+      if (used + w > width - 2) return;
+      used += w;
+      runs.push(run(text + "   ", g.tone));
+    });
+    return runs;
+  }
+
+  function baseline(view) {
+    const width = state.cols;
+    const L = [];
+    if (view === "detail") {
+      L.push(baselineTabs(width));
+      L.push(line());
+      L.push(line(run(topEdge("变更详情", "38/40 项", "📋", width), "t-frame")));
+      L.push(line(...spread(
+        [run("  " + fit(DETAIL.title, Math.max(8, width - 12)), "t-accent t-bold")],
+        "← 返回",
+        width,
+      )));
+      const labelW = 10;
+      const icon = { 仓库: "📁", 状态: "📌", 任务: "✅", 需求号: "🔢", 开发: "👤", 文件: "📄", 修改: "✏️" };
+      for (const [k, v] of DETAIL.fields) {
+        const rows = wrapCells(v, Math.max(8, width - 4 - labelW - 2));
+        rows.forEach((r, i) => {
+          L.push(line(
+            run("  " + (i === 0 ? pad((icon[k] ? icon[k] + " " : "") + k, labelW) : " ".repeat(labelW)), "t-dim"),
+            run("  " + r, ""),
+          ));
+        });
+      }
+      L.push(line(run("  " + "─".repeat(Math.max(0, width - 4)), "t-frame")));
+      L.push(line(run("  ▏ ✍️ 未完成", "t-dim")));
+      DETAIL.open.forEach((s, idx) => {
+        wrapCells(s, Math.max(8, width - 8)).forEach((r, i) => {
+          L.push(line(run("  ▏ " + (i === 0 ? ` ${idx + 1}. ` : "    ") + r, "t-dim")));
+        });
+      });
+      L.push(line(run(bottomEdge(width), "t-frame")));
+      return L;
+    }
+
+    L.push(baselineTabs(width));
+    L.push(line());
+    L.push(line(run(topEdge("OpenSpec", "7/14 项", "📋", width), "t-frame")));
+    L.push(line(...baselineGroupBar(width)));
+    L.push(line(run("  筛选 仓库：全部 · 时间：全部", "t-dim")));
+    L.push(line(run("  " + "─".repeat(Math.max(0, width - 4)), "t-frame")));
+    const repoW = width >= 72 ? 14 : 0;
+    const ageW = width >= 56 ? 5 : 0;
+    const head =
+      "  " + col("", 1) + "  " + col("", 1) + "  " + col("任务", 6) +
+      (ageW ? "  " + col("时间", ageW) : "") +
+      (repoW ? "  " + col("仓库", repoW) : "") + "  名称";
+    L.push(line(run("  " + head, "t-dim")));
+    L.push(line(run("  " + "─".repeat(Math.max(0, width - 4)), "t-frame")));
+    L.push(...baselineRows(width));
+    const foot = `  7/14 项 · 点行看详情`;
+    const right = width >= 56 ? "[ 全部收起 ]" : "";
+    L.push(line(...spread([run(foot, "t-dim")], right, width, "t-dim")));
+    L.push(line(run(bottomEdge(width), "t-frame")));
+    L.push(line());
+    L.push(line(run(topEdge("分支", "3 个仓库", "🔀", width), "t-frame")));
+    for (const b of BRANCHES) {
+      const nameW = width >= 56 ? 14 : 9;
+      const dirty = b.dirty ? " " + b.dirty : "";
+      const branchW = Math.max(6, width - 4 - 1 - 1 - nameW - 2 - tw(dirty) - (b.dirty && width >= 64 ? 10 : 0));
+      L.push(line(
+        run("  ", ""),
+        run(b.own ? "*" : "|", b.own ? "t-accent" : "t-dim"),
+        run(" " + col(b.own ? "根目录" : b.name, nameW) + "  ", "t-dim"),
+        run(fit(b.branch, branchW), "t-body"),
+        b.dirty ? run(" " + b.dirty, "t-warning") : null,
+      ));
+    }
+    L.push(line(run(bottomEdge(width), "t-frame")));
+    L.push(line());
+    return L;
+  }
+
+  /* ------------------------------------------------------------------ A · margin */
+
+  function marginRow(it, selected, width) {
+    const repoW = width >= 72 ? 16 : width >= 56 ? 12 : 0;
+    const ageW = width >= 56 ? 4 : 0;
+    const fixed = 2 + 2 + 6 + (ageW ? ageW + 2 : 0) + (repoW ? repoW + 2 : 0) + 2;
+    const nameW = Math.max(6, width - fixed);
+    return line(
+      run("  ", ""),
+      run(selected ? "▸ " : "  ", selected ? "t-accent" : ""),
+      run(col(it.done, 6), "t-dim"),
+      ageW ? run("  " + col(it.age, ageW), "t-dim") : null,
+      repoW ? run("  " + col(it.repo, repoW), "t-dim") : null,
+      run("  " + fit(it.name, nameW), selected ? "t-body t-bold" : "t-body"),
+    );
+  }
+
+  function margin(view) {
+    const width = state.cols;
+    const L = [];
+    if (view === "detail") return marginDetail(width);
+
+    L.push(line(run("▸ ", "t-accent"), run("OpenSpec", "t-accent t-bold"), run("   对话    MCP    提示音", "t-dim")));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line());
+    L.push(line(...spread([run("  OpenSpec", "t-body t-bold")], "3 进行中 · 14 项", width)));
+    for (const g of GROUPS) {
+      L.push(line(run(`  ${g.mark} ${g.label}  ${g.count}`, g.tone)));
+      itemsOf(g.key).forEach((it, i) => {
+        L.push(marginRow(it, g.key === "doing" && i === 0, width));
+      });
+    }
+    const foot = width >= 56 ? "  14/14 项 · 点行看详情" : "  14/14 项";
+    const branch = width >= 64 ? "分支 3 · main +3 · 1 脏" : width >= 40 ? "分支 3" : "";
+    L.push(line(...spread([run(foot, "t-dim")], branch, width)));
+    return L;
+  }
+
+  function marginDetail(width) {
+    const L = [];
+    const title = `OpenSpec / ${DETAIL.title}`;
+    L.push(...titleWithBack(title, width));
+    L.push(line(run("  " + "─".repeat(Math.max(0, width - 4)), "t-frame")));
+    const labelW = width >= 56 ? 8 : 6;
+    const valueW = Math.max(8, width - 2 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        ));
+      });
+    }
+    L.push(line());
+    L.push(line(run("  ▸ 未完成", "t-accent")));
+    DETAIL.open.forEach((s, idx) => {
+      const room = Math.max(8, width - 2 - 3);
+      wrapCells(s, room).forEach((r, i) => {
+        L.push(line(run("  " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body")));
+      });
+    });
+    return L;
+  }
+
+  /* -------------------------------------------------------------------- B · grid */
+
+  function gridRow(it, selected, width) {
+    const repoW = width >= 72 ? 14 : width >= 56 ? 10 : 0;
+    const ageW = width >= 56 ? 5 : 0;
+    const fixed = 2 + 2 + 2 + 7 + (ageW ? ageW + 2 : 0) + (repoW ? repoW + 2 : 0) + 2;
+    const nameW = Math.max(6, width - fixed);
+    return line(
+      run("  ", ""),
+      run(selected ? "▸ " : "  ", selected ? "t-accent" : ""),
+      run("  ", ""),
+      run(col(it.done, 7), "t-body"),
+      ageW ? run("  " + col(it.age, ageW), "t-dim") : null,
+      repoW ? run("  " + col(it.repo, repoW), "t-dim") : null,
+      run("  " + fit(it.name, nameW), "t-body"),
+    );
+  }
+
+  function gridHeader(width) {
+    const repoW = width >= 72 ? 14 : width >= 56 ? 10 : 0;
+    const ageW = width >= 56 ? 5 : 0;
+    return "  " + col("", 2) + "  " + col("任务", 7) +
+      (ageW ? "  " + col("时间", ageW) : "") +
+      (repoW ? "  " + col("仓库", repoW) : "") + "  名称";
+  }
+
+  function grid(view) {
+    const width = state.cols;
+    const L = [];
+    if (view === "detail") return gridDetail(width);
+
+    const keys = width >= 72 ? "1–4 页签 · z 折叠 · b 返回" : width >= 48 ? "1–4 · z · b" : "";
+    L.push(line(...spread(
+      [run(" bench", "t-bold"), run("  OpenSpec", "t-accent t-bold"), run("   对话    MCP    提示音", "t-dim")],
+      keys,
+      width,
+    )));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(run(gridHeader(width), "t-dim")));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    for (const g of GROUPS) {
+      const label = `  ${g.mark} ${g.label} ${g.count} `;
+      const fill = Math.max(1, width - tw(label) - 2);
+      L.push(line(run(label, g.tone), run("─".repeat(fill), "t-frame")));
+      itemsOf(g.key).forEach((it, i) => {
+        const sel = g.key === "doing" && i === 0;
+        const row = line(...gridRow(it, sel, width));
+        if (sel) row.cls = "sel";
+        L.push(row);
+      });
+    }
+    const foot = "  14/14 项 · 点行看详情";
+    const branch = width >= 64 ? "| main +3 · 2 脏" : width >= 40 ? "| +3" : "";
+    L.push(line(...spread([run(foot, "t-dim")], branch, width)));
+    return L;
+  }
+
+  function gridDetail(width) {
+    const L = [];
+    const title = DETAIL.title;
+    const header = "  OpenSpec / 变更详情  " + title;
+    if (tw(header) + 2 + 5 <= width) {
+      L.push(line(...spread(
+        [run("  ", ""), run("OpenSpec / 变更详情", "t-dim"), run("  " + title, "t-accent t-bold")],
+        "38/40",
+        width,
+      )));
+    } else {
+      L.push(...titleWithBack("OpenSpec / 变更详情", width, "t-dim"));
+      wrapName(title, Math.max(8, width - 4)).forEach((r) => {
+        L.push(line(run("  " + r, "t-accent t-bold")));
+      });
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    const labelW = width >= 56 ? 8 : 6;
+    const valueW = Math.max(8, width - 4 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        ));
+      });
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(run("  未完成", "t-accent")));
+    DETAIL.open.forEach((s, idx) => {
+      const room = Math.max(8, width - 8);
+      wrapCells(s, room).forEach((r, i) => {
+        L.push(line(run("  " + (i === 0 ? "[ ] " : "    ") + r, i === 0 ? "t-body" : "t-dim")));
+      });
+    });
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run("  ", "")], "b 返回 · ↑↓ 滚动", width)));
+    return L;
+  }
+
+  /* ------------------------------------------------------------------- C · spine */
+
+  const spineLine = (content) => line(run(" ", "rail-frame"), run(" ", ""), ...content);
+
+  function spineRow(it, selected, inner) {
+    const repoW = inner >= 72 ? 14 : inner >= 52 ? 10 : 0;
+    const ageW = inner >= 52 ? 5 : 0;
+    const fixed = 2 + 2 + 7 + (ageW ? ageW + 2 : 0) + (repoW ? repoW + 2 : 0) + 2;
+    const nameW = Math.max(6, inner - fixed);
+    return spineLine(line(
+      run("  ", ""),
+      run(selected ? "▸ " : "  ", selected ? "t-accent" : ""),
+      run(col(it.done, 7), "t-body"),
+      ageW ? run("  " + col(it.age, ageW), "t-dim") : null,
+      repoW ? run("  " + col(it.repo, repoW), "t-dim") : null,
+      run("  " + fit(it.name, nameW), selected ? "t-body t-bold" : "t-body"),
+    ));
+  }
+
+  function spine(view) {
+    const width = state.cols;
+    const L = [];
+    if (view === "detail") return spineDetail(width);
+
+    L.push(line(run(" ◉ OpenSpec", "t-accent t-bold"), run("   对话    MCP    提示音", "t-dim")));
+    L.push(line(...spread([run("  📋 OpenSpec", "t-body")], "3 进行中 · 14 项", width)));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    for (const g of GROUPS) {
+      L.push(spineLine(line(run(`  ${g.mark} ${g.label} ${g.count}`, g.tone))));
+      itemsOf(g.key).forEach((it, i) => {
+        L.push(spineRow(it, g.key === "doing" && i === 0, width - 2));
+      });
+    }
+    const foot = width >= 56 ? "  14/14 项 · 点行看详情" : "  14/14 项";
+    const branch = width >= 64 ? "分支 3 · main +3" : width >= 40 ? "分支 3" : "";
+    L.push(spineLine(spread([run(foot, "t-dim")], branch, width - 2)));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    return L;
+  }
+
+  function spineDetail(width) {
+    const inner = width - 2;
+    const L = [];
+    const title = "OpenSpec / 变更详情";
+    L.push(...titleWithBack(title, width, "t-dim"));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    wrapName(DETAIL.title, Math.max(8, inner - 4)).forEach((r) => {
+      L.push(spineLine(line(run("  " + r, "t-body t-bold"))));
+    });
+    const labelW = inner >= 56 ? 8 : 6;
+    const valueW = Math.max(8, inner - 2 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(spineLine(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        )));
+      });
+    }
+    L.push(spineLine(line()));
+    L.push(spineLine(line(run("  未完成", "t-accent"))));
+    DETAIL.open.forEach((s, idx) => {
+      const room = Math.max(8, inner - 6);
+      wrapCells(s, room).forEach((r, i) => {
+        L.push(spineLine(line(run("  " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body"))));
+      });
+    });
+    L.push(line(run("─".repeat(width), "t-frame")));
+    return L;
+  }
+
+  /* ------------------------------------------------------------------ D · tagged */
+
+  function tagOf(g) {
+    return state.cols >= 48 ? g.tag : g.short;
+  }
+
+  function tagRow(it, selected, width) {
+    const g = groupOf(it.g);
+    const tag = tagOf(g);
+    const tagW = state.cols >= 48 ? 5 : 2;
+    const repoW = width >= 72 ? 14 : width >= 56 ? 10 : 0;
+    const ageW = width >= 56 ? 4 : 0;
+    const fixed = 2 + 2 + tagW + 6 + (ageW ? ageW + 2 : 0) + (repoW ? repoW + 2 : 0) + 2;
+    const nameW = Math.max(6, width - fixed);
+    return line(
+      run("  ", ""),
+      run(selected ? "▸ " : "  ", selected ? "t-accent" : ""),
+      run(pad(tag, tagW), g.tone),
+      run(col(it.done, 6), "t-body"),
+      ageW ? run("  " + col(it.age, ageW), "t-dim") : null,
+      repoW ? run("  " + col(it.repo, repoW), "t-dim") : null,
+      run("  " + fit(it.name, nameW), selected ? "t-body t-bold" : "t-body"),
+    );
+  }
+
+  function tagRail(width) {
+    const compact = width < 56;
+    const runs = [];
+    if (compact) {
+      runs.push(run("  全部" + ITEMS.length, "t-body t-bold"));
+      for (const g of GROUPS) {
+        const text = ` ${tagOf(g)}${g.count}`;
+        if (2 + tw(runs.map((r) => r.t).join("")) + tw(text) > width) break;
+        runs.push(run(text, g.tone));
+      }
+      return runs;
+    }
+    runs.push(run("  全部 " + ITEMS.length, "t-body t-bold"));
+    for (const g of GROUPS) {
+      runs.push(run("   " + g.tag + " " + g.count, g.tone));
+    }
+    return runs;
+  }
+
+  function tagged(view) {
+    const width = state.cols;
+    const L = [];
+    if (view === "detail") return taggedDetail(width);
+
+    L.push(line(...spread(
+      [run("  OpenSpec", "t-accent t-bold"), run("   对话    MCP    提示音", "t-dim")],
+      "14 项",
+      width,
+    )));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...tagRail(width)));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    ITEMS.forEach((it, i) => {
+      L.push(tagRow(it, i === 0, width));
+    });
+    L.push(line(run("─".repeat(width), "t-frame")));
+    const keys = width >= 72 ? "1–4 页签 · 点状态筛选" : width >= 48 ? "1–4" : "";
+    L.push(line(...spread([run("  14 项 · 点行看详情", "t-dim")], keys, width)));
+    const branch = width >= 72
+      ? "分支  * 根目录 main +3   | old_sales …1084   | sales-platform …2001 +1"
+      : width >= 48
+        ? "分支  根目录 main +3 · 3 仓库 · 1 脏"
+        : "分支 3 · main +3";
+    L.push(line(run("  " + fit(branch, width - 2), "t-dim")));
+    return L;
+  }
+
+  function taggedDetail(width) {
+    const L = [];
+    const title = `OpenSpec / ${DETAIL.title}`;
+    L.push(...titleWithBack(title, width));
+    L.push(line(
+      run("  进行", "t-accent"),
+      run("  " + " ".repeat(Math.max(1, width - 8 - 8)), ""),
+      run("38/40", "t-dim"),
+    ));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    const labelW = width >= 56 ? 8 : 6;
+    const valueW = Math.max(8, width - 4 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        ));
+      });
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(run("  未完成", "t-accent")));
+    DETAIL.open.forEach((s, idx) => {
+      const room = Math.max(8, width - 8);
+      wrapCells(s, room).forEach((r, i) => {
+        L.push(line(run("  " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body")));
+      });
+    });
+    return L;
+  }
+
+  /* ------------------------------------------------------- E · hud / metering */
+
+  function pctOf(done) {
+    const m = /^(\d+)\/(\d+)$/.exec(String(done));
+    if (!m) return 0;
+    return Math.round((Number(m[1]) / Math.max(1, Number(m[2]))) * 100);
+  }
+
+  function meterOf(done, width) {
+    const w = Math.max(4, Math.floor(width));
+    const n = Math.max(0, Math.min(w, Math.round((pctOf(done) / 100) * w)));
+    return "[" + "#".repeat(n) + "-".repeat(w - n) + "]";
+  }
+
+  function runsWidth(runs) {
+    return runs.reduce((n, r) => n + tw(r.t), 0);
+  }
+
+  function padRuns(runs, width) {
+    const used = runsWidth(runs);
+    return used >= width ? runs : [...runs, run(" ".repeat(width - used), "")];
+  }
+
+  function codeOf(g) {
+    return ({ doing: "D", ready: "R", broken: "B", archived: "A", bare: "N" })[g.key] + g.count;
+  }
+
+  function hudBar(width) {
+    const total = ITEMS.length;
+    const inner = Math.max(8, width - 2);
+    const widths = GROUPS.map((g) => Math.max(3, Math.floor((g.count / total) * inner)));
+    let sum = widths.reduce((a, b) => a + b, 0);
+    while (sum > inner) {
+      const at = widths.indexOf(Math.max(...widths));
+      widths[at] -= 1;
+      sum -= 1;
+    }
+    while (sum < inner) {
+      const at = widths.indexOf(Math.max(...widths));
+      widths[at] += 1;
+      sum += 1;
+    }
+    const runs = [run("[", "t-frame")];
+    GROUPS.forEach((g, i) => runs.push(run("#".repeat(Math.max(0, widths[i])), g.tone)));
+    runs.push(run("]", "t-frame"));
+    return runs;
+  }
+
+  function hud(view) {
+    const width = state.cols;
+    if (view === "detail") return hudDetail(width);
+    const L = [];
+
+    const band1 = line(...spread([run(" BENCH // OPENSPEC", "t-bold")], "14 OPEN · 2 DIRTY", width));
+    band1.cls = "band";
+    const band2 = line(run(
+      width >= 56
+        ? " 3 DOING   2 READY   1 BROKEN   7 DONE   1 BARE"
+        : " 3D  2R  1B  7A  1N",
+      "t-bold",
+    ));
+    band2.cls = "band";
+    L.push(band1, band2);
+    L.push(line(...hudBar(width)));
+    L.push(line(run(
+      width >= 56
+        ? " 3 进行中 · 2 待归档 · 1 归档异常 · 7 已归档 · 1 无清单"
+        : " 3D 2R 1B 7A 1N",
+      "t-dim",
+    )));
+    L.push(line(run("─".repeat(width), "t-frame")));
+
+    const meterW = width >= 72 ? 10 : width >= 56 ? 7 : 0;
+    ITEMS.forEach((it, i) => {
+      const g = groupOf(it.g);
+      const sel = i === 0;
+      const nameW = Math.max(8, width - 15 - (meterW ? meterW + 3 : 0));
+      L.push(line(
+        run(sel ? "▸ " : "  ", sel ? "t-accent" : ""),
+        run(g.mark + " ", g.tone),
+        meterW ? run(meterOf(it.done, meterW) + " ", "t-dim") : null,
+        run(col(it.done, 6), "t-body"),
+        run("  " + fit(it.name, nameW), sel ? "t-body t-bold" : "t-body"),
+      ));
+    });
+
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(
+      run(" TICKER  ", "t-dim"),
+      run("old_sales ", "t-body"),
+      run("+3  ", "t-warning"),
+      run("sales-platform ", "t-body"),
+      run("+1  ", "t-warning"),
+      run("14 changes · last 11-17 15:44", "t-dim"),
+    ));
+    L.push(line(...spread([run(" 14 项 · 点行看详情", "t-dim")], "1–4 页签 · z 折叠", width)));
+    return L;
+  }
+
+  function hudDetail(width) {
+    const L = [];
+    const band1 = line(...spread([run(" BENCH // CHANGE", "t-bold")], "38/40 · 95%", width));
+    band1.cls = "band";
+    const band2 = line(run(" " + fit(DETAIL.title, width - 2), "t-bold"));
+    band2.cls = "band";
+    L.push(band1, band2);
+    L.push(line(run(" " + meterOf("38/40", Math.max(8, width - 8)) + " 95%", "t-accent")));
+    L.push(line(run("─".repeat(width), "t-frame")));
+
+    const labelW = width >= 56 ? 8 : 6;
+    const valueW = Math.max(8, width - 4 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        ));
+      });
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(run(" 未完成", "t-accent")));
+    DETAIL.open.forEach((s, idx) => {
+      const room = Math.max(8, width - 8);
+      wrapCells(s, room).forEach((r, i) => {
+        L.push(line(run("  " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body")));
+      });
+    });
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" 3/14 · detail", "t-dim")], "b 返回 · 1–4 页签", width)));
+    return L;
+  }
+
+  /* ------------------------------------------------------ F · poster / ascii box */
+
+  function hashRule(width) {
+    return line(run("#".repeat(Math.max(0, width)), "t-frame"));
+  }
+
+  function framed(content, width) {
+    return line(run("#", "t-frame"), ...padRuns(content, width - 2), run("#", "t-frame"));
+  }
+
+  function poster(view) {
+    const width = state.cols;
+    if (view === "detail") return posterDetail(width);
+    const sel = ITEMS[0];
+    const L = [];
+
+    L.push(hashRule(width));
+    const left = " BENCH / OPENSPEC";
+    const gap = Math.max(1, width - 3 - tw(left) - 2);
+    L.push(framed([run(left, "t-bold"), run(" ".repeat(gap), ""), run("14", "t-dim")], width));
+    L.push(framed([run(
+      width >= 56 ? " D=doing  R=ready  B=broken  A=archived  N=none" : " D  R  B  A  N",
+      "t-dim",
+    )], width));
+    L.push(hashRule(width));
+
+    const barW = Math.max(8, width - (width >= 56 ? 28 : 20));
+    L.push(framed([
+      run(" " + codeOf(GROUPS[0]) + "  ", "t-accent"),
+      run(meterOf(sel.done, barW), "t-accent"),
+      run("  " + pctOf(sel.done) + "%", "t-dim"),
+    ], width));
+    L.push(framed([run("     " + fit(sel.name, width - 10), "t-body t-bold")], width));
+    L.push(framed([run("     " + `${sel.done} · ${sel.repo} · ${sel.age} · 进行中`, "t-dim")], width));
+    L.push(framed([run("     open: " + fit(DETAIL.open[0], Math.max(8, width - 14)), "t-dim")], width));
+    L.push(hashRule(width));
+
+    const meterW = width >= 56 ? 16 : 6;
+    ITEMS.slice(1, 13).forEach((it) => {
+      const g = groupOf(it.g);
+      const nameW = Math.max(6, width - 19 - meterW);
+      L.push(framed([
+        run(" " + codeOf(g) + "  ", g.tone),
+        run(meterOf(it.done, meterW), "t-dim"),
+        run("  " + col(it.done, 6), "t-body"),
+        run("  " + fit(it.name, nameW), "t-body"),
+      ], width));
+    });
+    L.push(framed([run(" … 还有 " + (ITEMS.length - 13) + " 条", "t-dim")], width));
+    L.push(hashRule(width));
+    L.push(line(...spread([run(" 14 项 · 点行展开", "t-dim")], "1–4 页签", width)));
+    return L;
+  }
+
+  function posterDetail(width) {
+    const L = [];
+    L.push(hashRule(width));
+    L.push(framed([run(" D3 // 95%", "t-bold")], width));
+    wrapName(DETAIL.title, Math.max(8, width - 8)).forEach((r) => {
+      L.push(framed([run(" " + r, "t-accent t-bold")], width));
+    });
+    L.push(framed([run(" bench · 00d · zhongzhiguo · 38/40", "t-dim")], width));
+    L.push(framed([run(" " + meterOf("38/40", Math.max(8, width - 12)), "t-accent")], width));
+    L.push(hashRule(width));
+    L.push(framed([run(" OPEN TASKS", "t-dim")], width));
+    DETAIL.open.forEach((s, idx) => {
+      wrapCells(s, Math.max(8, width - 8)).forEach((r, i) => {
+        L.push(framed([run(" " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body")], width));
+      });
+    });
+    L.push(framed([run(" FILES  proposal.md · design.md · tasks.md", "t-dim")], width));
+    L.push(hashRule(width));
+    L.push(line(...spread([run(" 3/14", "t-dim")], "b 返回 · 1–4 页签", width)));
+    return L;
+  }
+
+  /* -------------------------------------------------------- G · split / master-detail */
+
+  function splitRow(leftRuns, rightRuns, leftW, width) {
+    const leftRoom = leftW - 2;
+    const rightRoom = width - leftW - 1;
+    return line(
+      run(" ", "rail"),
+      run(" ", ""),
+      ...padRuns(leftRuns, leftRoom),
+      run(" ", "rail-frame"),
+      ...padRuns(rightRuns, rightRoom),
+    );
+  }
+
+  function splitInspector(leftW) {
+    const inner = leftW - 2;
+    const sel = ITEMS[0];
+    const rows = [];
+    rows.push([run("OPENSPEC", "t-accent t-bold")]);
+    rows.push([run("─".repeat(inner), "t-frame")]);
+    wrapName(DETAIL.title, Math.max(8, inner - 2)).forEach((r) => {
+      rows.push([run("  " + r, "t-accent t-bold")]);
+    });
+    rows.push([run("  " + `${sel.done} · ${sel.repo} · ${sel.age}`, "t-dim")]);
+    rows.push([]);
+    [["状态", "进行中"], ["任务", sel.done], ["仓库", sel.repo], ["修改", sel.age]].forEach(([k, v]) => {
+      rows.push([run("  " + pad(k, 6), "t-dim"), run(v, "t-body")]);
+    });
+    rows.push([]);
+    rows.push([run("  文件", "t-dim")]);
+    const files = DETAIL.fields.find((f) => f[0] === "文件")[1];
+    wrapCells(files, Math.max(8, inner - 4)).forEach((r) => {
+      rows.push([run("  " + r, "t-dim")]);
+    });
+    rows.push([]);
+    rows.push([run("  b 返回", "t-dim")]);
+    return rows;
+  }
+
+  function splitList(rightW) {
+    const rows = [];
+    rows.push([run(" 变更", "t-dim")]);
+    rows.push([run("─".repeat(rightW), "t-frame")]);
+    ITEMS.forEach((it, i) => {
+      const g = groupOf(it.g);
+      const sel = i === 0;
+      rows.push([
+        run(sel ? " ▸ " : "   ", sel ? "t-accent" : ""),
+        run(g.mark + " ", g.tone),
+        run(col(it.done, 6) + "  " + col(it.age, 4) + "  ", "t-dim"),
+        run(fit(it.name, Math.max(6, rightW - 19)), sel ? "t-body t-bold" : "t-body"),
+      ]);
+    });
+    rows.push([run("─".repeat(rightW), "t-frame")]);
+    rows.push([run("14 项 · 点行看详情", "t-dim")]);
+    return rows;
+  }
+
+  function split(view) {
+    const width = state.cols;
+    if (view === "detail") return splitDetailPage(width);
+    if (width < 56) return splitSingle(width);
+    const leftW = width >= 72 ? 28 : width >= 64 ? 24 : 20;
+    const left = splitInspector(leftW);
+    const right = splitList(width - leftW - 1);
+    const L = [];
+    for (let i = 0; i < 24; i += 1) {
+      L.push(splitRow(left[i] || [], right[i] || [], leftW, width));
+    }
+    return L;
+  }
+
+  function splitSingle(width) {
+    const L = [];
+    L.push(line(run("  OPENSPEC", "t-accent t-bold"), run("  ·  双栏需 ≥56 列", "t-dim")));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    ITEMS.forEach((it, i) => {
+      const g = groupOf(it.g);
+      const sel = i === 0;
+      L.push(line(
+        run(sel ? "▸ " : "  ", sel ? "t-accent" : ""),
+        run(g.mark + " ", g.tone),
+        run(col(it.done, 6) + "  ", "t-dim"),
+        run(fit(it.name, Math.max(6, width - 14)), sel ? "t-body t-bold" : "t-body"),
+      ));
+    });
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" 14 项", "t-dim")], "1–4 页签", width)));
+    return L;
+  }
+
+  function splitDetailPage(width) {
+    const L = [];
+    L.push(...titleWithBack("OPENSPEC / 变更详情", width, "t-dim"));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    wrapName(DETAIL.title, Math.max(8, width - 4)).forEach((r) => {
+      L.push(line(run("  " + r, "t-accent t-bold")));
+    });
+    const labelW = width >= 56 ? 8 : 6;
+    const valueW = Math.max(8, width - 4 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        ));
+      });
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(run("  未完成", "t-accent")));
+    DETAIL.open.forEach((s, idx) => {
+      wrapCells(s, Math.max(8, width - 8)).forEach((r, i) => {
+        L.push(line(run("  " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body")));
+      });
+    });
+    return L;
+  }
+
+  /* ----------------------------------------------------------- H · hero / front page */
+
+  function heroIndex(it, width) {
+    const g = groupOf(it.g);
+    const repoW = width >= 72 ? 14 : 0;
+    const ageW = width >= 56 ? 4 : 0;
+    const fixed = 3 + 6 + (ageW ? ageW + 2 : 0) + (repoW ? repoW + 2 : 0) + 2;
+    const nameW = Math.max(6, width - fixed);
+    return line(
+      run(" " + g.mark + " ", g.tone),
+      run(col(it.done, 6), "t-body"),
+      ageW ? run("  " + col(it.age, ageW), "t-dim") : null,
+      repoW ? run("  " + col(it.repo, repoW), "t-dim") : null,
+      run("  " + fit(it.name, nameW), "t-body"),
+    );
+  }
+
+  function hero(view) {
+    const width = state.cols;
+    if (view === "detail") return heroDetail(width);
+    const sel = ITEMS[0];
+    const L = [];
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" BENCH DAILY", "t-bold")], "11-17 16:40", width)));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    wrapName(sel.name, Math.max(8, width - 2)).forEach((r) => {
+      L.push(line(run(" " + r, "t-accent t-bold")));
+    });
+    L.push(line(run(" " + `${sel.done} · ${sel.repo} · 进行中 · ${sel.age}`, "t-dim")));
+    L.push(line(run(" " + meterOf(sel.done, Math.max(8, width - 14)) + " " + pctOf(sel.done) + "%", "t-accent")));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" INDEX", "t-dim")], "3 doing · 14", width)));
+    ITEMS.slice(1, 13).forEach((it) => L.push(heroIndex(it, width)));
+    if (ITEMS.length > 13) {
+      L.push(line(run(" … 还有 " + (ITEMS.length - 13) + " 条", "t-dim")));
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" 14 项 · 点行看详情", "t-dim")], "1–4 页签 · b 返回", width)));
+    return L;
+  }
+
+  function heroDetail(width) {
+    const L = [];
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" BENCH DAILY", "t-bold")], "11-17 16:40", width)));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    wrapName(DETAIL.title, Math.max(8, width - 2)).forEach((r) => {
+      L.push(line(run(" " + r, "t-accent t-bold")));
+    });
+    L.push(line(run(" " + `38/40 · bench · 进行中 · 00d`, "t-dim")));
+    L.push(line(run(" " + meterOf("38/40", Math.max(8, width - 14)) + " 95%", "t-accent")));
+    L.push(line(run("─".repeat(width), "t-frame")));
+    const labelW = width >= 56 ? 8 : 6;
+    const valueW = Math.max(8, width - 4 - labelW - 2);
+    for (const [k, v] of DETAIL.fields) {
+      wrapCells(v, valueW).forEach((r, i) => {
+        L.push(line(
+          run("  " + (i === 0 ? pad(k, labelW) : " ".repeat(labelW)), "t-dim"),
+          run("  " + r, "t-body"),
+        ));
+      });
+    }
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(run("  未完成", "t-accent")));
+    DETAIL.open.forEach((s, idx) => {
+      wrapCells(s, Math.max(8, width - 8)).forEach((r, i) => {
+        L.push(line(run("  " + (i === 0 ? `${idx + 1}. ` : "   ") + r, "t-body")));
+      });
+    });
+    L.push(line(run("─".repeat(width), "t-frame")));
+    L.push(line(...spread([run(" ", "")], "b 返回 · 1–4 页签", width)));
+    return L;
+  }
+
+  /* ------------------------------------------------------------------ render */
+
+  const RENDERERS = { baseline, margin, grid, spine, tagged, hud, poster, split, hero };
+
+  function renderTerm(name) {
+    const host = document.querySelector(`[data-render="${name}"]`);
+    if (!host) return;
+    const term = host.closest(".term");
+    term.style.setProperty("--cols", state.cols);
+    host.innerHTML = "";
+    const lines = RENDERERS[name](state.views[name] || "list", state.cols);
+    for (const l of lines) host.appendChild(renderLine(l, { cls: l.cls || "" }));
+    const hint = document.querySelector(`[data-hint="${name}"]`);
+    if (hint) {
+      if (lines.length > ROWS) {
+        hint.hidden = false;
+        hint.textContent = `↑↓ 滚动 · 1/${lines.length}`;
+      } else {
+        hint.hidden = true;
+      }
+    }
+  }
+
+  function rerenderAll() {
+    Object.keys(RENDERERS).forEach(renderTerm);
+  }
+
+  function syncButtons() {
+    document.querySelectorAll("[data-style]").forEach((b) => {
+      b.setAttribute("aria-pressed", String(b.dataset.view === state.views[b.dataset.style]));
+    });
+    document.querySelectorAll("[data-width]").forEach((b) => {
+      b.setAttribute("aria-pressed", String(Number(b.dataset.width) === state.cols));
+    });
+    document.querySelectorAll("[data-cols]").forEach((el) => {
+      el.textContent = String(state.cols);
+    });
+  }
+
+  /* ------------------------------------------------------------------- wiring */
+
+  document.querySelectorAll("[data-style]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const style = btn.dataset.style;
+      state.views[style] = btn.dataset.view;
+      document.querySelectorAll(`[data-style="${style}"]`).forEach((b) => {
+        b.setAttribute("aria-pressed", String(b.dataset.view === state.views[style]));
+      });
+      renderTerm(style);
+    });
+  });
+
+  document.querySelectorAll("[data-width]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.cols = Number(btn.dataset.width);
+      document.querySelectorAll("[data-width]").forEach((b) => {
+        b.setAttribute("aria-pressed", String(Number(b.dataset.width) === state.cols));
+      });
+      document.querySelectorAll("[data-cols]").forEach((el) => {
+        el.textContent = String(state.cols);
+      });
+      rerenderAll();
+    });
+  });
+
+  rerenderAll();
+  syncButtons();
+})();
+</script>
+</body>
+</html>

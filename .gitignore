@@ -19,3 +19,6 @@ node_modules/
 *.log
 .dev-panel-dock.txt
 .bench-dock.txt
+
+# One-off terminal transcript kept for local reference, not part of the repo
+/2026-11-17-181548-html.txt

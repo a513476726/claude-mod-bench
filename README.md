@@ -20,7 +20,7 @@ Claude Code 的开发者工作台：一块常驻面板，把 OpenSpec 进度、�
 
 ```bash
 claude plugin marketplace add a513476726/claude-mod-bench
-claude plugin install bench@claude-mod-bench
+claude plugin install bench@dev-mods
 ```
 
 装好后输入 `/panel` 打开面板。
