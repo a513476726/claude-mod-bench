@@ -1,7 +1,7 @@
 import type { EngineInterface, PluginOptions } from 'claude-code'
 
 import { capText } from './format'
-import { discoverOf } from './scan'
+import { discoverOf, gitRead } from './scan'
 
 /**
  * Where a row's folder is on disk: `.` is the folder holding the repos (the
@@ -162,15 +162,15 @@ export async function openDiff(
   // Tracked work comes from `git diff`. A new file is not in that diff at all, and
   // showing it as nothing said "nothing changed" about a tree that had changed.
   const [ran, untracked, listed, againstHead] = await Promise.all([
-    $.process.run(['git', 'diff', '--unified=3'], { cwd: path }).catch(() => null),
+    $.process.run(gitRead('diff', '--unified=3'), { cwd: path }).catch(() => null),
     // NUL-separated: a name with a space or a newline in it comes back as one name.
     $.process.run(['git', 'ls-files', '-z', '--others', '--exclude-standard'], { cwd: path }).catch(() => null),
-    $.process.run(['git', 'status', '--porcelain'], { cwd: path }).catch(() => null),
+    $.process.run(gitRead('status', '--porcelain'), { cwd: path }).catch(() => null),
     // A staged change is not in `git diff` (which reads work tree against index), and
     // a brand-new file is in neither: `git diff HEAD` names both, which is what a
     // person means by "my changes". A repository with no commit at all answers
     // nothing here, and the work-tree diff stands.
-    $.process.run(['git', 'diff', 'HEAD', '--unified=3'], { cwd: path }).catch(() => null),
+    $.process.run(gitRead('diff', 'HEAD', '--unified=3'), { cwd: path }).catch(() => null),
   ])
 
   const fresh = (untracked?.stdout ?? '')

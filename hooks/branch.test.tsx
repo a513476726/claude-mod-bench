@@ -30,10 +30,11 @@ function clock(on: On) {
 }
 
 /** The engine's plumbing, and a filesystem that answers from a table. */
-function laying(on: On, opts: { cwd: string; stat: (path: string) => File | null; list: (path: string) => { name: string; kind: 'dir' | 'file' }[]; read: (path: string) => string }) {
+function laying(on: On, opts: { cwd: string; stat: (path: string) => File | null; list: (path: string) => { name: string; kind: 'dir' | 'file' }[]; read: (path: string) => string; shown?: boolean }) {
   const clocker = clock(on)
   on('command.register', () => ({ value: { command: 'panel' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'bench', title: '开发者工作台', isShown: opts.shown ?? true, isFocused: true, isPlaced: true }] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: opts.cwd }))
   on('fs.stat', (_, e) => {
@@ -197,6 +198,35 @@ test('a checkout between turns reaches the branch line on the poll, not on the n
   await clocker.advance(5_000)
 
   expect(await ui.find({ type: 'Text', text: /feature-x/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
+test('a hidden pane reads no branch and no changes on its polls', async ($, on) => {
+  const head = { ref: 'refs/heads/main' }
+
+  const clocker = laying(on, {
+    cwd: '/work/dev-panel',
+    stat: path => {
+      if (path === '/work/dev-panel/.git' || path === '/work/dev-panel' || path === '/work/dev-panel/openspec') return dir
+      return null
+    },
+    list: path => (path === '/work' ? [entry('dev-panel')] : []),
+    read: path => (path === '/work/dev-panel/.git/HEAD' ? `ref: ${head.ref}\n` : ''),
+    shown: false,
+  })
+
+  await $.session.start({ cwd: '/work/dev-panel', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect((await ui.find({ type: 'Text', text: /main/ }))?.text ?? '').toContain('main')
+
+  head.ref = 'refs/heads/feature-x'
+  await clocker.advance(5_000)
+
+  // The pane is a tab behind: the timer fired, but nothing was read and nothing moved.
+  expect(await ui.find({ type: 'Text', text: /feature-x/ })).toBeUndefined()
 
   await ui.unmount()
 })

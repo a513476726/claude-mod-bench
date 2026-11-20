@@ -216,6 +216,27 @@ function resultText(ran: unknown): string {
 /** The poll tickets run while the pane is up; one set per session, never re-armed. */
 const pollTickets: { cancel: () => void }[] = []
 
+/** Whether this plugin's pane is the one the surface shows. A tick with the pane
+ * hidden (another tab, closed, or no surface) reads no git and no folders, so an
+ * idle panel costs nothing and never touches `.git`. The timer stays armed, so
+ * showing the pane again needs no re-arm. */
+async function paneIsShown($: EngineInterface): Promise<boolean> {
+  try {
+    const panes = await $.ui.panes()
+    return panes.some(one => one.id === PANE && one.isShown)
+  } catch {
+    return false
+  }
+}
+
+async function poll($: EngineInterface, isBranchPoll: boolean): Promise<void> {
+  if (!(await paneIsShown($))) {
+    return
+  }
+
+  await refresh($, isBranchPoll)
+}
+
 /**
  * Re-reads the branches and the change list on their own periods while the pane is
  * up. Each read writes only what moved, so an idle stretch costs a HEAD read and a
@@ -229,8 +250,8 @@ function startPolling($: EngineInterface): void {
 
   // The branch line and the change list ask different questions — "where am I now"
   // and "what does this workspace hold" — so each keeps its own beat.
-  pollTickets.push($.clock.every(BRANCH_POLL_MS, () => void refresh($, true)))
-  pollTickets.push($.clock.every(SPEC_POLL_MS, () => void refresh($, false)))
+  pollTickets.push($.clock.every(BRANCH_POLL_MS, () => void poll($, true)))
+  pollTickets.push($.clock.every(SPEC_POLL_MS, () => void poll($, false)))
 }
 
 /** Keeps only what the reading is: the model's window and its fill. A reading that

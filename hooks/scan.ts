@@ -44,6 +44,16 @@ const IGNORED = ['.git', 'node_modules']
 const PARKED = ['.claude/worktrees', '.git']
 
 /**
+ * A read-only git call. `--no-optional-locks` keeps `git status` and `git diff`
+ * from refreshing the index, so a poll never writes `.git/index` or takes
+ * `.git/index.lock`. A file watcher (WeChat DevTools watches the whole project)
+ * reads that lock as a source change and restarts its build.
+ */
+export function gitRead(...args: string[]): string[] {
+  return ['git', '--no-optional-locks', ...args]
+}
+
+/**
  * The folders this session stands on: the one the session is in, the workspace
  * around it, and the repos beside it. Both the branch line and the OpenSpec scan
  * read this one answer, so the two can never disagree about what a repo is.
@@ -433,7 +443,7 @@ export async function gitUserOf($: EngineInterface, repoDir: string): Promise<st
 
 /** How many files the working copy has changed here; 0 is a clean tree. */
 export async function changesAt($: EngineInterface, dir: string): Promise<number> {
-  const ran = await $.process.run(['git', 'status', '--porcelain'], { cwd: dir }).catch(() => null)
+  const ran = await $.process.run(gitRead('status', '--porcelain'), { cwd: dir }).catch(() => null)
 
   if (ran === null || ran.exitCode !== 0) {
     return 0
